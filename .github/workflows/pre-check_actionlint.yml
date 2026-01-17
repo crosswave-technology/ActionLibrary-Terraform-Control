@@ -1,0 +1,140 @@
+name: Actionlint Pre-Check
+permissions:
+  contents: read
+  pull-requests: write
+
+on:
+  pull_request:
+    types:
+      - opened
+      - synchronize
+      - reopened
+      - ready_for_review
+    paths: 
+      - 'action.yml'
+      - 'action.yaml'
+      - '.github/workflows/**'
+
+jobs:
+  actionlint:
+    runs-on: ubuntu-latest
+    env:
+      ACTIONLINT_VERSION: "1.6.27"
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@v4
+
+      - name: Install actionlint
+        shell: bash
+        run: |
+          set -euo pipefail
+          version="${ACTIONLINT_VERSION}"
+          url="https://github.com/rhysd/actionlint/releases/download/v${version}/actionlint_${version}_linux_amd64.tar.gz"
+          curl -sSLo actionlint.tar.gz "$url"
+          tar -xzf actionlint.tar.gz actionlint
+          chmod +x actionlint
+          echo "$PWD" >> "$GITHUB_PATH"
+
+      - name: Run actionlint
+        id: actionlint
+        shell: bash
+        run: |
+          set -euo pipefail
+          raw_output="$RUNNER_TEMP/actionlint_raw.txt"
+          clean_output="$RUNNER_TEMP/actionlint.txt"
+          exit_code=0
+          if ! actionlint -color >"$raw_output" 2>&1; then
+            exit_code=$?
+          fi
+          sed -E 's/\x1B\[[0-9;]*[A-Za-z]//g' "$raw_output" >"$clean_output"
+          if [ "$exit_code" -eq 0 ]; then
+            echo "status=pass" >> "$GITHUB_OUTPUT"
+          else
+            echo "status=fail" >> "$GITHUB_OUTPUT"
+          fi
+          echo "output_file=$clean_output" >> "$GITHUB_OUTPUT"
+
+      - name: Actionlint summary
+        if: always()
+        shell: bash
+        run: |
+          set -euo pipefail
+          status="${{ steps.actionlint.outputs.status }}"
+          output_file="${{ steps.actionlint.outputs.output_file }}"
+          if [ "$status" = "pass" ]; then
+            header=":heavy_check_mark: Actionlint scan - passed (required)"
+          else
+            header=":x: Actionlint scan - failed (required)"
+          fi
+          {
+            echo "### Actionlint pre-check"
+            echo ""
+            echo "$header"
+            echo ""
+            echo "<details>"
+            echo "<summary>Actionlint output</summary>"
+            echo ""
+            echo '```'
+            cat "$output_file"
+            echo '```'
+            echo "</details>"
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Actionlint PR comment
+        if: always()
+        env:
+          GH_TOKEN: ${{ github.token }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          pr_number="${{ github.event.pull_request.number }}"
+          comment_marker="<!-- actionlint-precheck -->"
+          run_url="https://github.com/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}"
+          status="${{ steps.actionlint.outputs.status }}"
+          output_file="${{ steps.actionlint.outputs.output_file }}"
+
+          output="$(cat "$output_file")"
+          if [ -z "$output" ]; then
+            output="No issues found."
+          fi
+          max_len=60000
+          if [ "${#output}" -gt "$max_len" ]; then
+            output="${output:0:$max_len}\n… (truncated)"
+          fi
+
+          if [ "$status" = "pass" ]; then
+            status_line=":heavy_check_mark: Actionlint scan - passed (required)"
+          else
+            status_line=":x: Actionlint scan - failed (required)"
+          fi
+
+          body=$(cat <<EOF
+          ${comment_marker}
+          ### Actionlint pre-check (automated)
+
+          ${status_line}
+
+          Run: [${GITHUB_RUN_ID}](${run_url})
+
+          <details>
+          <summary>Actionlint output</summary>
+
+          \`\`\`
+          ${output}
+          \`\`\`
+          </details>
+          EOF
+          )
+
+          payload=$(jq -n --arg body "$body" '{body:$body}')
+          comment_id=$(gh api "repos/${GITHUB_REPOSITORY}/issues/${pr_number}/comments" --paginate --jq ".[] | select(.body | contains(\"${comment_marker}\")) | .id" | head -n 1)
+          if [ -n "$comment_id" ]; then
+            gh api "repos/${GITHUB_REPOSITORY}/issues/comments/${comment_id}" -X PATCH --input - <<<"$payload" >/dev/null
+          else
+            gh api "repos/${GITHUB_REPOSITORY}/issues/${pr_number}/comments" -X POST --input - <<<"$payload" >/dev/null
+          fi
+
+          if [ "$status" != "pass" ]; then
+            echo "Actionlint failed." >&2
+            exit 1
+          fi

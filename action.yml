@@ -1,0 +1,231 @@
+name: Terraform Control
+description: "Run terraform init/plan/apply/destroy with summarized outputs."
+
+inputs:
+  working-directory:
+    description: "Directory containing Terraform configuration."
+    required: true
+  command:
+    description: "Terraform command: plan, apply, destroy, validate, or fmt."
+    required: false
+    default: "plan"
+  terraform-version:
+    description: "Terraform version to install if not present (e.g. 1.6.6)."
+    required: false
+    default: ""
+  init-args:
+    description: "Additional args for terraform init."
+    required: false
+    default: ""
+  plan-args:
+    description: "Additional args for terraform plan."
+    required: false
+    default: ""
+  apply-args:
+    description: "Additional args for terraform apply."
+    required: false
+    default: ""
+  destroy-args:
+    description: "Additional args for terraform destroy."
+    required: false
+    default: ""
+  validate-args:
+    description: "Additional args for terraform validate."
+    required: false
+    default: ""
+  fmt-args:
+    description: "Additional args for terraform fmt -check."
+    required: false
+    default: ""
+  run-fmt:
+    description: "Run terraform fmt -check before the command."
+    required: false
+    default: "false"
+  run-validate:
+    description: "Run terraform validate before the command."
+    required: false
+    default: "false"
+  auto-approve:
+    description: "When true, add -auto-approve for apply/destroy."
+    required: false
+    default: "false"
+  emit-full-plan:
+    description: "When true, include full plan output in the action summary."
+    required: false
+    default: "false"
+  outputs-display:
+    description: "Display Terraform outputs: all, changes_only, or nothing."
+    required: false
+    default: "changes_only"
+
+outputs:
+  plan_exit_code:
+    description: "Exit code from terraform plan (0=clean,2=changes,1=error)."
+    value: ${{ steps.plan.outputs.plan_exit_code }}
+  plan_has_changes:
+    description: "true when terraform plan detects changes."
+    value: ${{ steps.plan.outputs.plan_has_changes }}
+  plan_add:
+    description: "Resources to add."
+    value: ${{ steps.plan.outputs.plan_add }}
+  plan_change:
+    description: "Resources to change."
+    value: ${{ steps.plan.outputs.plan_change }}
+  plan_destroy:
+    description: "Resources to destroy."
+    value: ${{ steps.plan.outputs.plan_destroy }}
+  plan_summary:
+    description: "Plan summary string."
+    value: ${{ steps.plan.outputs.plan_summary }}
+  plan_file:
+    description: "Absolute path to the plan file."
+    value: ${{ steps.plan.outputs.plan_file }}
+  plan_text_file:
+    description: "Absolute path to the rendered plan text."
+    value: ${{ steps.plan.outputs.plan_text_file }}
+
+runs:
+  using: "composite"
+  steps:
+    - name: Install Terraform
+      shell: bash
+      run: |
+        set -euo pipefail
+        version="${{ inputs.terraform-version }}"
+
+        if [ -z "$version" ] && command -v terraform >/dev/null 2>&1; then
+          terraform -version
+          exit 0
+        fi
+
+        if [ -z "$version" ]; then
+          echo "Terraform not found and terraform-version not provided." >&2
+          exit 1
+        fi
+
+        archive="terraform_${version}_linux_amd64.zip"
+        url="https://releases.hashicorp.com/terraform/${version}/${archive}"
+        curl -fsSLo "$archive" "$url"
+        unzip -o "$archive" -d "$RUNNER_TEMP/terraform-bin"
+        echo "$RUNNER_TEMP/terraform-bin" >> "$GITHUB_PATH"
+        terraform -version
+
+    - name: Terraform Init
+      shell: bash
+      working-directory: ${{ inputs.working-directory }}
+      run: |
+        set -euo pipefail
+        terraform init -input=false -no-color ${{ inputs.init-args }}
+
+    - name: Terraform fmt
+      if: ${{ inputs.command == 'fmt' || inputs.run-fmt == 'true' }}
+      shell: bash
+      working-directory: ${{ inputs.working-directory }}
+      run: |
+        set -euo pipefail
+        terraform fmt -check ${{ inputs.fmt-args }}
+
+    - name: Terraform validate
+      if: ${{ inputs.command == 'validate' || inputs.run-validate == 'true' }}
+      shell: bash
+      working-directory: ${{ inputs.working-directory }}
+      run: |
+        set -euo pipefail
+        terraform validate -no-color ${{ inputs.validate-args }}
+
+    - name: Terraform plan
+      if: ${{ inputs.command == 'plan' }}
+      id: plan
+      shell: bash
+      working-directory: ${{ inputs.working-directory }}
+      run: |
+        set -euo pipefail
+
+        plan_file="$(pwd)/terraform.plan"
+        plan_text_file="$(pwd)/terraform.plan.txt"
+        exit_code=0
+
+        set +e
+        terraform plan -no-color -input=false -detailed-exitcode -out="$plan_file" ${{ inputs.plan-args }}
+        exit_code=$?
+        set -e
+
+        has_changes="false"
+        if [ "$exit_code" -eq 2 ]; then
+          has_changes="true"
+        fi
+
+        add="0"
+        change="0"
+        destroy="0"
+
+        if [ "$exit_code" -ne 1 ] && [ -f "$plan_file" ]; then
+          terraform show -no-color "$plan_file" > "$plan_text_file"
+          if command -v jq >/dev/null 2>&1; then
+            counts=$(terraform show -json "$plan_file" | jq -r '
+              [ .resource_changes[].change.actions ] | flatten
+              | {
+                  add: (map(select(. == "create")) | length),
+                  change: (map(select(. == "update")) | length),
+                  destroy: (map(select(. == "delete")) | length)
+                }')
+            add=$(jq -r '.add' <<< "$counts")
+            change=$(jq -r '.change' <<< "$counts")
+            destroy=$(jq -r '.destroy' <<< "$counts")
+          fi
+        fi
+
+        summary="Add: ${add}, Change: ${change}, Destroy: ${destroy}"
+
+        echo "plan_exit_code=$exit_code" >> "$GITHUB_OUTPUT"
+        echo "plan_has_changes=$has_changes" >> "$GITHUB_OUTPUT"
+        echo "plan_add=$add" >> "$GITHUB_OUTPUT"
+        echo "plan_change=$change" >> "$GITHUB_OUTPUT"
+        echo "plan_destroy=$destroy" >> "$GITHUB_OUTPUT"
+        echo "plan_summary=$summary" >> "$GITHUB_OUTPUT"
+        echo "plan_file=$plan_file" >> "$GITHUB_OUTPUT"
+        echo "plan_text_file=$plan_text_file" >> "$GITHUB_OUTPUT"
+
+        if [ "${{ inputs.emit-full-plan }}" = "true" ] && [ -f "$plan_text_file" ]; then
+          {
+            echo "### Terraform plan"
+            echo ""
+            echo "Summary: $summary"
+            echo ""
+            echo "<details>"
+            echo "<summary>Full plan output</summary>"
+            echo ""
+            echo '```'
+            cat "$plan_text_file"
+            echo '```'
+            echo "</details>"
+          } >> "$GITHUB_STEP_SUMMARY"
+        fi
+
+        if [ "$exit_code" -eq 1 ]; then
+          exit 1
+        fi
+
+    - name: Terraform apply
+      if: ${{ inputs.command == 'apply' }}
+      shell: bash
+      working-directory: ${{ inputs.working-directory }}
+      run: |
+        set -euo pipefail
+        approve_flag=""
+        if [ "${{ inputs.auto-approve }}" = "true" ]; then
+          approve_flag="-auto-approve"
+        fi
+        terraform apply -no-color -input=false $approve_flag ${{ inputs.apply-args }}
+
+    - name: Terraform destroy
+      if: ${{ inputs.command == 'destroy' }}
+      shell: bash
+      working-directory: ${{ inputs.working-directory }}
+      run: |
+        set -euo pipefail
+        approve_flag=""
+        if [ "${{ inputs.auto-approve }}" = "true" ]; then
+          approve_flag="-auto-approve"
+        fi
+        terraform destroy -no-color -input=false $approve_flag ${{ inputs.destroy-args }}

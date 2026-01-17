@@ -1,0 +1,227 @@
+name: Require Version Label
+permissions:
+  pull-requests: write
+  issues: write
+  
+on:
+  pull_request:
+    types:
+      - opened
+      - labeled
+      - unlabeled
+
+jobs:
+  require-version-label:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Validate PR version label
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const REQUIRED_LABELS = ["patch", "minor", "major"];
+            const COMMENT_TAG = "<!-- version-label-check -->";
+
+            const labels = (context.payload.pull_request.labels || []).map(l => l.name);
+            const matches = labels.filter(l => REQUIRED_LABELS.includes(l.toLowerCase()));
+            const { owner, repo } = context.repo;
+            const issue_number = context.payload.pull_request.number;
+            const prHeadRepo = context.payload.pull_request.head.repo.full_name;
+            const baseRepo = `${owner}/${repo}`;
+            const isFork = prHeadRepo !== baseRepo;
+
+            core.info(`PR labels: ${labels.join(", ") || "(none)"}`);
+            core.info(`Version labels found: ${matches.join(", ") || "(none)"}`);
+
+            const files = await github.paginate(github.rest.pulls.listFiles, {
+              owner,
+              repo,
+              pull_number: issue_number,
+              per_page: 100,
+            });
+            const filenames = files.map(file => file.filename || "");
+            const isIgnoredFile = name => {
+              const lower = name.toLowerCase();
+              return lower.startsWith(".github/") || lower === "version" || lower.endsWith("/version");
+            };
+            const relevantFiles = filenames.filter(name => name && !isIgnoredFile(name));
+            const nonDocFiles = relevantFiles.filter(name => {
+              const lower = name.toLowerCase();
+              return !lower.endsWith(".md");
+            });
+            const isDocOnly = nonDocFiles.length === 0;
+
+            let existing = null;
+            if (!isFork) {
+              const comments = await github.paginate(github.rest.issues.listComments, {
+                owner,
+                repo,
+                issue_number,
+                per_page: 100,
+              });
+              existing = comments.find(comment => (comment.body || "").includes(COMMENT_TAG)) || null;
+            }
+
+            const upsertComment = async (body, { allowCreate = true } = {}) => {
+              if (isFork) {
+                core.info("Skipping PR comment on forked PR.");
+                return false;
+              }
+              try {
+                if (existing) {
+                  await github.rest.issues.updateComment({
+                    owner,
+                    repo,
+                    comment_id: existing.id,
+                    body,
+                  });
+                  return true;
+                }
+                if (allowCreate) {
+                  await github.rest.issues.createComment({
+                    owner,
+                    repo,
+                    issue_number,
+                    body,
+                  });
+                  return true;
+                }
+                return false;
+              } catch (error) {
+                core.warning(`Unable to post PR comment: ${error.message}`);
+                return false;
+              }
+            };
+
+            const renderNonDocSummary = () => {
+              if (!relevantFiles.length) {
+                return "Only `.github/*` or `VERSION` files were changed; version label is not required.";
+              }
+              if (!nonDocFiles.length) {
+                return "Doc-only changes detected (`*.md` only).";
+              }
+              return "Non-documentation files were detected in this PR.";
+            };
+
+            const writeSummary = async (title, bodyLines) => {
+              await core.summary
+                .addHeading(title)
+                .addRaw(bodyLines.join("\n"))
+                .write();
+            };
+
+            const buildMissingMessage = () => [
+              COMMENT_TAG,
+              "### :warning: Missing version label",
+              "",
+              "This automated check failed because **no version label** is attached and this PR includes non-documentation changes.",
+              "",
+              ":label: **Required**: add exactly one label: **Patch**, **Minor**, or **Major**.",
+              "",
+              "#### How to choose the correct label",
+              "- **Patch**: small fixes or low-risk changes.",
+              "- **Minor**: new backward-compatible behavior.",
+              "- **Major**: breaking changes or behavior shifts.",
+              "",
+              "<details>",
+              "<summary><strong>Why a version label is required</strong></summary>",
+              "",
+              "- The version action promotes based on a single label.",
+              "- Multiple labels or none makes the promotion ambiguous.",
+              "</details>",
+              "",
+              "<details>",
+              "<summary><strong>Doc-only exception</strong></summary>",
+              "",
+              "If a PR changes only `*.md` files, `.github/*`, or `VERSION`, no version label is required.",
+              "</details>",
+            ].join("\n");
+
+            const buildMultipleMessage = found => [
+              COMMENT_TAG,
+              "### :no_entry_sign: Multiple version labels detected",
+              "",
+              "This automated check failed because more than one version label is attached.",
+              "",
+              ":label: **Required**: keep exactly one label: **Patch**, **Minor**, or **Major**.",
+              "",
+              `**Currently found**: ${found.join(", ") || "(none)"}`,
+              "",
+              "Remove the extra label(s) so the promotion is unambiguous.",
+            ].join("\n");
+
+            const buildResolvedMessage = label => [
+              COMMENT_TAG,
+              "### :white_check_mark: Version label set",
+              "",
+              `Detected label: **${label}**.`,
+              "",
+              "No further action needed for version labeling.",
+            ].join("\n");
+
+            const buildDocOnlyResolvedMessage = () => [
+              COMMENT_TAG,
+              "### :information_source: Version label not required",
+              "",
+              "Doc-only changes detected (`*.md` only) or changes limited to `.github/*` or `VERSION`.",
+              "",
+              "No version label is required for this PR.",
+            ].join("\n");
+
+            if (matches.length === 0) {
+              if (isDocOnly) {
+                if (existing) {
+                  await upsertComment(buildDocOnlyResolvedMessage(), { allowCreate: false });
+                }
+                await writeSummary("Version label not required (automated check)", [
+                "Doc-only changes detected (`*.md` only) or changes limited to `.github/*` or `VERSION`.",
+                "",
+                "No version label is required for this PR.",
+              ]);
+                core.info("Doc-only changes detected; skipping version label requirement.");
+                return;
+              }
+              await upsertComment(buildMissingMessage());
+              await writeSummary("Version label required (automated check)", [
+                "This check failed because no version label was found and this PR includes non-documentation changes.",
+                "",
+                "Please add exactly one of: **Patch**, **Minor**, **Major**.",
+                "",
+                "Why this matters:",
+                "- The version action promotes based on a single label.",
+                "- Multiple labels or none makes the promotion ambiguous.",
+                "",
+                "How to choose:",
+                "- **Patch**: small fixes or low-risk changes.",
+                "- **Minor**: new backward-compatible behavior.",
+                "- **Major**: breaking changes or behavior shifts.",
+                "",
+                "Doc-only exception: if a PR changes only `*.md` files, no version label is required.",
+                "",
+                renderNonDocSummary(),
+              ]);
+              core.setFailed(
+                "Missing required version label. Add exactly one of: Patch, Minor, Major."
+              );
+            } else if (matches.length > 1) {
+              await upsertComment(buildMultipleMessage(matches));
+              await writeSummary("Multiple version labels detected (automated check)", [
+                "Please keep exactly one of: **Patch**, **Minor**, **Major**.",
+                "",
+                `Currently found: ${matches.join(", ") || "(none)"}`,
+                "",
+                "Remove the extra label(s) so the promotion is unambiguous.",
+              ]);
+              core.setFailed(
+                `Multiple version labels found (${matches.join(", ")}). Please keep exactly one.`
+              );
+            } else {
+              if (existing) {
+                await upsertComment(buildResolvedMessage(matches[0]), { allowCreate: false });
+              }
+              await writeSummary("Version label set (automated check)", [
+                `Thanks. Detected label: **${matches[0]}**.`,
+                "",
+                "No further action needed for version labeling.",
+              ]);
+              core.info(`OK: ${matches[0]} label present.`);
+            }
