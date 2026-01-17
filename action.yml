@@ -107,6 +107,7 @@ runs:
         url="https://releases.hashicorp.com/terraform/${version}/${archive}"
         curl -fsSLo "$archive" "$url"
         unzip -o "$archive" -d "$RUNNER_TEMP/terraform-bin"
+        export PATH="$RUNNER_TEMP/terraform-bin:$PATH"
         echo "$RUNNER_TEMP/terraform-bin" >> "$GITHUB_PATH"
         terraform -version
 
