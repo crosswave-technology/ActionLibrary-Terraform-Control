@@ -53,6 +53,18 @@ inputs:
     description: "When true, include full plan output in the action summary."
     required: false
     default: "false"
+  emit-summary:
+    description: "When true, include a structured summary in the action summary for plan/apply."
+    required: false
+    default: "true"
+  emit-raw-plan:
+    description: "When true, include the raw plan output in the action summary."
+    required: false
+    default: "true"
+  summary-max-lines:
+    description: "Maximum diff lines per resource in the summary."
+    required: false
+    default: "80"
   outputs-display:
     description: "Display Terraform outputs: all, changes_only, or nothing."
     required: false
@@ -193,22 +205,6 @@ runs:
         echo "plan_text_file=$plan_text_file" >> "$GITHUB_OUTPUT"
         echo "trace_file=$trace_file" >> "$GITHUB_OUTPUT"
 
-        if [ "${{ inputs.emit-full-plan }}" = "true" ] && [ -f "$plan_text_file" ]; then
-          {
-            echo "### Terraform plan"
-            echo ""
-            echo "Summary: $summary"
-            echo ""
-            echo "<details>"
-            echo "<summary>Full plan output</summary>"
-            echo ""
-            echo '```'
-            cat "$plan_text_file"
-            echo '```'
-            echo "</details>"
-          } >> "$GITHUB_STEP_SUMMARY"
-        fi
-
         if [ "$exit_code" -eq 1 ] && [ -z "${TF_LOG:-}" ]; then
           set +e
           TF_LOG=TRACE TF_LOG_PATH="$trace_file" terraform plan -no-color -input=false -detailed-exitcode -out="$plan_file" ${{ inputs.plan-args }}
@@ -221,6 +217,7 @@ runs:
 
     - name: Terraform apply
       if: ${{ inputs.command == 'apply' }}
+      id: apply
       shell: bash
       working-directory: ${{ inputs.working-directory }}
       run: |
@@ -230,6 +227,293 @@ runs:
           approve_flag="-auto-approve"
         fi
         terraform apply -no-color -input=false $approve_flag ${{ inputs.apply-args }}
+
+    - name: Terraform summary
+      if: ${{ always() && (inputs.command == 'plan' || inputs.command == 'apply') && inputs.emit-summary == 'true' }}
+      shell: bash
+      working-directory: ${{ inputs.working-directory }}
+      env:
+        COMMAND: ${{ inputs.command }}
+        PLAN_EXIT_CODE: ${{ steps.plan.outputs.plan_exit_code }}
+        PLAN_HAS_CHANGES: ${{ steps.plan.outputs.plan_has_changes }}
+        PLAN_ADD: ${{ steps.plan.outputs.plan_add }}
+        PLAN_CHANGE: ${{ steps.plan.outputs.plan_change }}
+        PLAN_DESTROY: ${{ steps.plan.outputs.plan_destroy }}
+        PLAN_TEXT_FILE: ${{ steps.plan.outputs.plan_text_file }}
+        APPLY_OUTCOME: ${{ steps.apply.outcome }}
+        EMIT_RAW_PLAN: ${{ inputs.emit-raw-plan }}
+        EMIT_FULL_PLAN: ${{ inputs.emit-full-plan }}
+        SUMMARY_MAX_LINES: ${{ inputs.summary-max-lines }}
+      run: |
+        set -euo pipefail
+
+        command="${COMMAND:-plan}"
+        plan_add="${PLAN_ADD:-}"
+        plan_change="${PLAN_CHANGE:-}"
+        plan_destroy="${PLAN_DESTROY:-}"
+        plan_exit_code="${PLAN_EXIT_CODE:-}"
+        plan_has_changes="${PLAN_HAS_CHANGES:-}"
+        plan_text_file="${PLAN_TEXT_FILE:-}"
+        apply_outcome="${APPLY_OUTCOME:-}"
+        emit_raw_plan="${EMIT_RAW_PLAN:-true}"
+        if [ "${EMIT_FULL_PLAN:-false}" = "true" ]; then
+          emit_raw_plan="true"
+        fi
+        max_lines_per_resource="${SUMMARY_MAX_LINES:-80}"
+
+        if [ -z "$plan_text_file" ] || [ ! -f "$plan_text_file" ]; then
+          if [ -f "terraform.plan.txt" ]; then
+            plan_text_file="$(pwd)/terraform.plan.txt"
+          fi
+        fi
+
+        if [ -z "$plan_text_file" ] || [ ! -f "$plan_text_file" ]; then
+          if [ -f "terraform.plan" ]; then
+            terraform show -no-color "terraform.plan" > "terraform.plan.txt" || true
+            if [ -f "terraform.plan.txt" ]; then
+              plan_text_file="$(pwd)/terraform.plan.txt"
+            fi
+          fi
+        fi
+
+        if [ -f "$plan_text_file" ]; then
+          plan_line="$(grep -E 'Plan: [0-9]+ to add, [0-9]+ to change, [0-9]+ to destroy\\.' "$plan_text_file" | tail -n 1 || true)"
+          if [ -n "$plan_line" ]; then
+            plan_add="$(printf '%s' "$plan_line" | sed -E 's/.*Plan: ([0-9]+) to add, ([0-9]+) to change, ([0-9]+) to destroy.*/\\1/')"
+            plan_change="$(printf '%s' "$plan_line" | sed -E 's/.*Plan: ([0-9]+) to add, ([0-9]+) to change, ([0-9]+) to destroy.*/\\2/')"
+            plan_destroy="$(printf '%s' "$plan_line" | sed -E 's/.*Plan: ([0-9]+) to add, ([0-9]+) to change, ([0-9]+) to destroy.*/\\3/')"
+          fi
+        fi
+
+        plan_add="${plan_add:-?}"
+        plan_change="${plan_change:-?}"
+        plan_destroy="${plan_destroy:-?}"
+
+        if [ "$command" = "plan" ]; then
+          header="### Terraform pre-check"
+          has_plan_summary="false"
+          has_errors="false"
+          if [ -f "$plan_text_file" ]; then
+            if grep -q 'Plan:' "$plan_text_file"; then
+              has_plan_summary="true"
+            fi
+            if grep -q '^Error:' "$plan_text_file"; then
+              if grep -v '^Error: Process completed with exit code' "$plan_text_file" | grep -q '^Error:'; then
+                has_errors="true"
+              fi
+            fi
+          fi
+          if [ "$plan_has_changes" = "true" ] || { [ "$plan_exit_code" = "1" ] && [ "$has_plan_summary" = "true" ] && [ "$has_errors" = "false" ]; }; then
+            status_line=":heavy_check_mark: Terraform plan - changes detected (required)"
+          elif [ "$plan_exit_code" = "1" ]; then
+            status_line=":x: Terraform plan - failed (required)"
+          else
+            status_line=":heavy_check_mark: Terraform plan - no changes (required)"
+          fi
+        else
+          header="### Terraform apply"
+          if [ "$apply_outcome" = "failure" ]; then
+            status_line=":x: Terraform apply - failed"
+          else
+            status_line=":heavy_check_mark: Terraform apply - completed"
+          fi
+        fi
+
+        {
+          echo "$header"
+          echo ""
+          echo "$status_line"
+          echo ""
+          echo "| Add | Change | Destroy |"
+          echo "| --- | --- | --- |"
+          echo "| ${plan_add} | ${plan_change} | ${plan_destroy} |"
+        } >> "$GITHUB_STEP_SUMMARY"
+
+        if [ ! -f "$plan_text_file" ]; then
+          {
+            echo ""
+            echo "_Plan output not available._"
+          } >> "$GITHUB_STEP_SUMMARY"
+          exit 0
+        fi
+
+        warnings_file="${RUNNER_TEMP:-/tmp}/terraform-warnings.txt"
+        awk '
+          BEGIN { in_warning = 0 }
+          /^Warning:/ {
+            if (in_warning) print ""
+            in_warning = 1
+          }
+          in_warning { print }
+          in_warning && NF == 0 { in_warning = 0 }
+        ' "$plan_text_file" > "$warnings_file"
+
+        if [ -s "$warnings_file" ]; then
+          {
+            echo ""
+            echo "### Warnings"
+            echo ""
+            echo "<details>"
+            echo "<summary>Terraform warnings</summary>"
+            echo ""
+            echo '```'
+            cat "$warnings_file"
+            echo '```'
+            echo "</details>"
+          } >> "$GITHUB_STEP_SUMMARY"
+        fi
+
+        resource_details="${RUNNER_TEMP:-/tmp}/terraform-resource-changes.md"
+        drift_details="${RUNNER_TEMP:-/tmp}/terraform-resource-drift.md"
+        : > "$resource_details"
+        : > "$drift_details"
+        awk -v plan_out="$resource_details" -v drift_out="$drift_details" -v max_lines="$max_lines_per_resource" '
+          function action_for(header) {
+            if (header ~ /will be created/) return "add"
+            if (header ~ /will be updated in-place/) return "update"
+            if (header ~ /will be read during apply/) return "read"
+            if (header ~ /must be replaced/ || header ~ /will be replaced/) return "replace"
+            if (header ~ /will be destroyed/) return "remove"
+            if (header ~ /has been created/) return "add"
+            if (header ~ /has been updated/ || header ~ /has been changed/) return "update"
+            if (header ~ /has been deleted/) return "remove"
+            return "unknown"
+          }
+          function icon_for(action) {
+            if (action == "add") return ":heavy_plus_sign:"
+            if (action == "update") return ":heavy_minus_sign:"
+            if (action == "replace") return ":heavy_multiplication_x:"
+            if (action == "remove") return ":x:"
+            if (action == "read") return ":mag:"
+            return ":grey_question:"
+          }
+          function address_for(header, addr) {
+            addr = header
+            sub(/ will be created.*/, "", addr)
+            sub(/ will be updated in-place.*/, "", addr)
+            sub(/ will be read during apply.*/, "", addr)
+            sub(/ must be replaced.*/, "", addr)
+            sub(/ will be replaced.*/, "", addr)
+            sub(/ will be destroyed.*/, "", addr)
+            sub(/ has been created.*/, "", addr)
+            sub(/ has been updated.*/, "", addr)
+            sub(/ has been changed.*/, "", addr)
+            sub(/ has been deleted.*/, "", addr)
+            gsub(/[[:space:]]+$/, "", addr)
+            return addr
+          }
+          function escape_html(s) {
+            gsub(/&/, "\\&amp;", s)
+            gsub(/</, "\\&lt;", s)
+            gsub(/>/, "\\&gt;", s)
+            return s
+          }
+          function reset_block() {
+            header=""
+            block=""
+            line_count=0
+            total_lines=0
+            truncated=0
+            current_out=""
+          }
+          function add_line(line) {
+            total_lines++
+            if (line_count < max_lines) {
+              if (block == "") {
+                block = line
+              } else {
+                block = block "\n" line
+              }
+              line_count++
+            } else {
+              truncated=1
+            }
+          }
+          function flush() {
+            if (header != "" && current_out != "") {
+              print "<details>" >> current_out
+              print "<summary>" icon_for(action_for(header)) " " address_for(header) "</summary>" >> current_out
+              print "<pre>" >> current_out
+              if (block != "") {
+                print escape_html(block) >> current_out
+              } else {
+                print "(no attribute changes detected)" >> current_out
+              }
+              if (truncated) {
+                print "\n... (" (total_lines - max_lines) " more lines)" >> current_out
+              }
+              print "</pre>" >> current_out
+              print "</details>" >> current_out
+              print "" >> current_out
+            }
+            reset_block()
+          }
+          BEGIN {
+            mode=""
+            if (max_lines == "" || max_lines <= 0) max_lines=80
+            reset_block()
+          }
+          /^Note: Objects have changed outside of Terraform/ { if (mode != "drift") { flush(); mode="drift" } }
+          /^Terraform detected the following changes made outside of Terraform/ { if (mode != "drift") { flush(); mode="drift" } }
+          /^Terraform used the selected providers/ { if (mode == "drift") { flush(); mode="" } }
+          /^Terraform will perform the following actions:/ { if (mode != "plan") { flush(); mode="plan" } }
+          /^Plan:|^Changes to Outputs:|^No changes\\./ { flush(); exit }
+          /^[[:space:]]*# / {
+            if (mode == "") { next }
+            candidate=$0
+            sub(/^[[:space:]]*# /, "", candidate)
+            if (candidate ~ /^\\(/) { next }
+            flush()
+            header=candidate
+            current_out=(mode == "drift" ? drift_out : plan_out)
+            next
+          }
+          {
+            if (header != "") {
+              add_line($0)
+            }
+          }
+          END { flush() }
+        ' "$plan_text_file"
+
+        {
+          echo ""
+          echo "### Drift detected"
+          echo ""
+          if [ -s "$drift_details" ]; then
+            cat "$drift_details"
+          else
+            echo "_No drift detected._"
+          fi
+        } >> "$GITHUB_STEP_SUMMARY"
+
+        {
+          echo ""
+          echo "### Resource changes"
+          echo ""
+          if [ -s "$resource_details" ]; then
+            cat "$resource_details"
+          elif [ "$plan_has_changes" != "true" ]; then
+            echo "_No planned resource changes._"
+          else
+            echo "_Resource changes summary unavailable._"
+          fi
+        } >> "$GITHUB_STEP_SUMMARY"
+
+        if [ "$emit_raw_plan" = "true" ]; then
+          {
+            echo ""
+            echo "---"
+            echo ""
+            echo "<details>"
+            echo "<summary>RAW Plan Output</summary>"
+            echo ""
+            echo '```'
+            cat "$plan_text_file"
+            echo '```'
+            echo "</details>"
+          } >> "$GITHUB_STEP_SUMMARY"
+        fi
 
     - name: Terraform destroy
       if: ${{ inputs.command == 'destroy' }}
