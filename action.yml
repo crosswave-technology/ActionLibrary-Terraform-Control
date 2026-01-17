@@ -462,7 +462,7 @@ runs:
             if (mode == "") { next }
             candidate=$0
             sub(/^[[:space:]]*# /, "", candidate)
-            if (candidate ~ /^\\(/) { next }
+            if (candidate ~ /^[(]/) { next }
             flush()
             header=candidate
             current_out=(mode == "drift" ? drift_out : plan_out)
