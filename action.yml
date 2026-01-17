@@ -83,6 +83,9 @@ outputs:
   plan_text_file:
     description: "Absolute path to the rendered plan text."
     value: ${{ steps.plan.outputs.plan_text_file }}
+  trace_file:
+    description: "Absolute path to the Terraform trace log file (if generated)."
+    value: ${{ steps.plan.outputs.trace_file }}
 
 runs:
   using: "composite"
@@ -178,6 +181,8 @@ runs:
 
         summary="Add: ${add}, Change: ${change}, Destroy: ${destroy}"
 
+        trace_file="${TF_LOG_PATH:-$RUNNER_TEMP/terraform-trace.log}"
+
         echo "plan_exit_code=$exit_code" >> "$GITHUB_OUTPUT"
         echo "plan_has_changes=$has_changes" >> "$GITHUB_OUTPUT"
         echo "plan_add=$add" >> "$GITHUB_OUTPUT"
@@ -186,6 +191,7 @@ runs:
         echo "plan_summary=$summary" >> "$GITHUB_OUTPUT"
         echo "plan_file=$plan_file" >> "$GITHUB_OUTPUT"
         echo "plan_text_file=$plan_text_file" >> "$GITHUB_OUTPUT"
+        echo "trace_file=$trace_file" >> "$GITHUB_OUTPUT"
 
         if [ "${{ inputs.emit-full-plan }}" = "true" ] && [ -f "$plan_text_file" ]; then
           {
@@ -201,6 +207,12 @@ runs:
             echo '```'
             echo "</details>"
           } >> "$GITHUB_STEP_SUMMARY"
+        fi
+
+        if [ "$exit_code" -eq 1 ] && [ -z "${TF_LOG:-}" ]; then
+          set +e
+          TF_LOG=TRACE TF_LOG_PATH="$trace_file" terraform plan -no-color -input=false -detailed-exitcode -out="$plan_file" ${{ inputs.plan-args }}
+          set -e
         fi
 
         if [ "$exit_code" -eq 1 ]; then
