@@ -129,6 +129,12 @@ outputs:
   trace_file:
     description: "Absolute path to the Terraform trace log file (if generated)."
     value: ${{ steps.plan.outputs.trace_file }}
+  apply_exit_code:
+    description: "Exit code from terraform apply."
+    value: ${{ steps.apply.outputs.apply_exit_code }}
+  apply_log_file:
+    description: "Absolute path to the terraform apply log file."
+    value: ${{ steps.apply.outputs.apply_log_file }}
 
 runs:
   using: "composite"
@@ -350,7 +356,18 @@ runs:
         if [ "${{ inputs.auto-approve }}" = "true" ]; then
           approve_flag="-auto-approve"
         fi
-        terraform apply -no-color -input=false $approve_flag ${{ inputs.apply-args }}
+        apply_log_file="${RUNNER_TEMP:-/tmp}/terraform-apply.log"
+        exit_code=0
+
+        set +e
+        terraform apply -no-color -input=false $approve_flag ${{ inputs.apply-args }} 2>&1 | tee "$apply_log_file"
+        exit_code=${PIPESTATUS[0]}
+        set -e
+
+        echo "apply_exit_code=$exit_code" >> "$GITHUB_OUTPUT"
+        echo "apply_log_file=$apply_log_file" >> "$GITHUB_OUTPUT"
+
+        exit "$exit_code"
 
     - name: Terraform summary
       if: ${{ always() && (inputs.command == 'plan' || inputs.command == 'apply') && inputs.emit-summary == 'true' }}
@@ -368,6 +385,8 @@ runs:
         PLAN_TEXT_FILE: ${{ steps.plan.outputs.plan_text_file }}
         PLAN_LOG_FILE: ${{ steps.plan.outputs.plan_log_file }}
         APPLY_OUTCOME: ${{ steps.apply.outcome }}
+        APPLY_EXIT_CODE: ${{ steps.apply.outputs.apply_exit_code }}
+        APPLY_LOG_FILE: ${{ steps.apply.outputs.apply_log_file }}
         VALIDATE_EXIT_CODE: ${{ steps.validate.outputs.exit_code }}
         VALIDATE_OUTCOME: ${{ steps.validate.outcome }}
         VALIDATE_LOG_FILE: ${{ steps.validate.outputs.log_file }}
@@ -394,6 +413,8 @@ runs:
         plan_text_file="${PLAN_TEXT_FILE:-}"
         plan_log_file="${PLAN_LOG_FILE:-}"
         apply_outcome="${APPLY_OUTCOME:-}"
+        apply_exit_code="${APPLY_EXIT_CODE:-}"
+        apply_log_file="${APPLY_LOG_FILE:-}"
         emit_raw_plan="${EMIT_RAW_PLAN:-true}"
         if [ "${EMIT_FULL_PLAN:-false}" = "true" ]; then
           emit_raw_plan="true"
@@ -612,11 +633,178 @@ runs:
           fi
         else
           header="### Terraform apply"
-          if [ "$apply_outcome" = "failure" ]; then
+          if [ "$apply_outcome" = "failure" ] || { [ -n "$apply_exit_code" ] && [ "$apply_exit_code" != "0" ]; }; then
             status_line=":x: Terraform apply - failed"
           else
             status_line=":heavy_check_mark: Terraform apply - completed"
           fi
+        fi
+
+        apply_changes_file="${RUNNER_TEMP:-/tmp}/terraform-apply-changes.md"
+        apply_errors_file="${RUNNER_TEMP:-/tmp}/terraform-apply-errors.md"
+        apply_counts_file="${RUNNER_TEMP:-/tmp}/terraform-apply-counts.txt"
+        apply_applied="0"
+        apply_failed="0"
+
+        if [ "$command" = "apply" ]; then
+          if [ -z "$apply_log_file" ] || [ ! -f "$apply_log_file" ]; then
+            if [ -f "${RUNNER_TEMP:-/tmp}/terraform-apply.log" ]; then
+              apply_log_file="${RUNNER_TEMP:-/tmp}/terraform-apply.log"
+            elif [ -f "terraform-apply.log" ]; then
+              apply_log_file="$(pwd)/terraform-apply.log"
+            fi
+          fi
+
+          if [ -n "$apply_log_file" ] && [ -f "$apply_log_file" ]; then
+            APPLY_LOG_FILE="$apply_log_file" APPLY_CHANGES_FILE="$apply_changes_file" APPLY_ERRORS_FILE="$apply_errors_file" APPLY_COUNTS_FILE="$apply_counts_file" MAX_LINES="$max_lines_per_resource" node <<'NODE'
+            const fs = require("fs");
+            const logPath = process.env.APPLY_LOG_FILE;
+            const changesPath = process.env.APPLY_CHANGES_FILE;
+            const errorsPath = process.env.APPLY_ERRORS_FILE;
+            const countsPath = process.env.APPLY_COUNTS_FILE;
+            const maxLines = Math.max(parseInt(process.env.MAX_LINES || "80", 10), 1);
+
+            const writeFile = (path, content) => {
+              if (path) {
+                fs.writeFileSync(path, content);
+              }
+            };
+
+            if (!logPath || !fs.existsSync(logPath)) {
+              writeFile(changesPath, "");
+              writeFile(errorsPath, "");
+              writeFile(countsPath, "applied=0\nfailed=0\n");
+              process.exit(0);
+            }
+
+            const raw = fs.readFileSync(logPath, "utf8");
+            const lines = raw.split(/\r?\n/);
+            const allowed = /^(Creating|Modifying|Destroying|Recreating|Creation complete|Modifications complete|Destruction complete|Recreation complete|Still creating|Still modifying|Still destroying|Reading|Read complete|Refreshing state|Refresh complete)/;
+
+            const resourceLines = new Map();
+            const resourceOrder = [];
+            const errorBlocks = new Map();
+            const errorOrder = [];
+
+            const escapeHtml = (value) => {
+              return value
+                .replace(/&/g, "&amp;")
+                .replace(/</g, "&lt;")
+                .replace(/>/g, "&gt;");
+            };
+
+            const addResourceLine = (address, line) => {
+              if (!resourceLines.has(address)) {
+                resourceLines.set(address, []);
+                resourceOrder.push(address);
+              }
+              resourceLines.get(address).push(line);
+            };
+
+            lines.forEach((line) => {
+              const match = line.match(/^([^\s].*?):\s+(.*)$/);
+              if (!match) {
+                return;
+              }
+              const address = match[1].trim();
+              const message = match[2].trim();
+              if (!allowed.test(message)) {
+                return;
+              }
+              addResourceLine(address, line);
+            });
+
+            let currentError = null;
+            const flushError = () => {
+              if (!currentError || currentError.length === 0) {
+                return;
+              }
+              let address = "apply error";
+              for (const line of currentError) {
+                const match = line.match(/^\s*with\s+([^,]+),/);
+                if (match) {
+                  address = match[1].trim();
+                  break;
+                }
+              }
+              if (!errorBlocks.has(address)) {
+                errorBlocks.set(address, []);
+                errorOrder.push(address);
+              }
+              errorBlocks.get(address).push(currentError);
+              currentError = null;
+            };
+
+            lines.forEach((line) => {
+              if (line.startsWith("Error:")) {
+                flushError();
+                currentError = [line];
+                return;
+              }
+              if (currentError) {
+                currentError.push(line);
+              }
+            });
+            flushError();
+
+            const renderDetails = (icon, address, contentLines) => {
+              let linesToShow = contentLines.slice();
+              let truncated = false;
+              if (linesToShow.length > maxLines) {
+                linesToShow = linesToShow.slice(0, maxLines);
+                truncated = true;
+              }
+              let body = linesToShow.join("\n").trim();
+              if (!body) {
+                body = "(no apply output captured)";
+              }
+              if (truncated) {
+                body += `\n\n... (${contentLines.length - maxLines} more lines)`;
+              }
+              return [
+                "<details>",
+                `<summary>${icon} ${address}</summary>`,
+                "<pre>",
+                escapeHtml(body),
+                "</pre>",
+                "</details>",
+                "",
+              ].join("\n");
+            };
+
+            const failedSet = new Set(errorOrder);
+            const successAddresses = resourceOrder.filter((address) => !failedSet.has(address));
+
+            const successOutput = successAddresses
+              .map((address) => renderDetails(":heavy_minus_sign:", address, resourceLines.get(address) || []))
+              .join("\n");
+
+            const errorOutput = errorOrder
+              .map((address) => {
+                const blocks = errorBlocks.get(address) || [];
+                const flattened = [];
+                blocks.forEach((block, index) => {
+                  if (index > 0) {
+                    flattened.push("");
+                  }
+                  flattened.push(...block);
+                });
+                return renderDetails(":x:", address, flattened);
+              })
+              .join("\n");
+
+            writeFile(changesPath, successOutput ? successOutput + "\n" : "");
+            writeFile(errorsPath, errorOutput ? errorOutput + "\n" : "");
+            writeFile(countsPath, `applied=${successAddresses.length}\nfailed=${errorOrder.length}\n`);
+        NODE
+          fi
+
+          if [ -f "$apply_counts_file" ]; then
+            apply_applied="$(grep -E '^applied=' "$apply_counts_file" | head -n 1 | cut -d= -f2)"
+            apply_failed="$(grep -E '^failed=' "$apply_counts_file" | head -n 1 | cut -d= -f2)"
+          fi
+          apply_applied="${apply_applied:-0}"
+          apply_failed="${apply_failed:-0}"
         fi
 
         {
@@ -631,9 +819,15 @@ runs:
             echo "| Checkov scan | ${checkov_icon} ${checkov_status} | ${checkov_detail} |"
             echo ""
           fi
-          echo "| Add | Change | Destroy |"
-          echo "| --- | --- | --- |"
-          echo "| ${plan_add} | ${plan_change} | ${plan_destroy} |"
+          if [ "$command" = "plan" ]; then
+            echo "| Add | Change | Destroy |"
+            echo "| --- | --- | --- |"
+            echo "| ${plan_add} | ${plan_change} | ${plan_destroy} |"
+          else
+            echo "| Applied | Failed |"
+            echo "| --- | --- |"
+            echo "| ${apply_applied} | ${apply_failed} |"
+          fi
         } >> "$summary_file"
 
         if [ "$command" = "plan" ]; then
@@ -656,6 +850,53 @@ runs:
             echo ""
             echo "Run: [${GITHUB_RUN_ID}](${run_url})"
           } >> "$comment_file"
+        fi
+
+        if [ "$command" = "apply" ]; then
+          apply_error_excerpt=""
+          if [ -n "$apply_log_file" ] && [ -f "$apply_log_file" ]; then
+            apply_log_excerpt="${RUNNER_TEMP:-/tmp}/terraform-apply-error.log"
+            log_size=$(wc -c < "$apply_log_file" | tr -d ' ')
+            if [ "$log_size" -gt "$max_log_chars" ]; then
+              head -c "$max_log_chars" "$apply_log_file" > "$apply_log_excerpt"
+              printf "\n\n...truncated (%s chars)\n" "$log_size" >> "$apply_log_excerpt"
+            else
+              cp "$apply_log_file" "$apply_log_excerpt"
+            fi
+            apply_error_excerpt="$apply_log_excerpt"
+          fi
+
+          {
+            echo ""
+            if [ -s "$apply_errors_file" ]; then
+              echo "### Apply failures"
+              echo ""
+              cat "$apply_errors_file"
+            elif [ -n "$apply_error_excerpt" ] && [ -f "$apply_error_excerpt" ] && { [ -n "$apply_exit_code" ] && [ "$apply_exit_code" != "0" ]; }; then
+              echo "### Apply failures"
+              echo ""
+              echo "<details>"
+              echo "<summary>:x: apply error</summary>"
+              echo ""
+              echo '```'
+              cat "$apply_error_excerpt"
+              echo '```'
+              echo "</details>"
+              echo ""
+            fi
+            echo "### Applied resources"
+            echo ""
+            if [ -s "$apply_changes_file" ]; then
+              cat "$apply_changes_file"
+            else
+              echo "_No applied resources detected._"
+            fi
+          } >> "$summary_file"
+
+          cat "$summary_file" >> "$GITHUB_STEP_SUMMARY"
+          echo "comment_file=$comment_file" >> "$GITHUB_OUTPUT"
+          echo "comment_marker=$comment_marker" >> "$GITHUB_OUTPUT"
+          exit 0
         fi
 
         if [ "$command" = "plan" ] && [ "$validate_status" = "failed" ] && [ -n "$validate_log" ] && [ -f "$validate_log" ]; then
