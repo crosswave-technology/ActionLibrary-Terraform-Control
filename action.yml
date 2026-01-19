@@ -45,6 +45,34 @@ inputs:
     description: "Run terraform validate before the command."
     required: false
     default: "false"
+  validate-on-plan:
+    description: "Run terraform validate before plan."
+    required: false
+    default: "true"
+  checkov-enabled:
+    description: "Run checkov scan before plan."
+    required: false
+    default: "true"
+  checkov-framework:
+    description: "Checkov framework to scan."
+    required: false
+    default: "terraform"
+  checkov-var-file:
+    description: "Optional Checkov var-file path (repo-relative)."
+    required: false
+    default: ".github/repo_config.tfvars"
+  checkov-fail-severities:
+    description: "Comma-separated list of Checkov severities that fail the run."
+    required: false
+    default: "CRITICAL,HIGH"
+  comment-on-pr:
+    description: "Post a PR comment for plan results."
+    required: false
+    default: "true"
+  pr-number:
+    description: "PR number to comment on when not running under pull_request."
+    required: false
+    default: ""
   auto-approve:
     description: "When true, add -auto-approve for apply/destroy."
     required: false
@@ -141,16 +169,109 @@ runs:
         set -euo pipefail
         terraform fmt -check ${{ inputs.fmt-args }}
 
+    - name: Terraform validate (pre-plan)
+      if: ${{ inputs.command == 'plan' && inputs.validate-on-plan == 'true' }}
+      id: validate
+      continue-on-error: true
+      shell: bash
+      working-directory: ${{ inputs.working-directory }}
+      run: |
+        set -euo pipefail
+        log_file="${RUNNER_TEMP:-/tmp}/terraform-validate.log"
+        set +e
+        terraform validate -no-color ${{ inputs.validate-args }} 2>&1 | tee "$log_file"
+        exit_code=${PIPESTATUS[0]}
+        set -e
+        echo "exit_code=$exit_code" >> "$GITHUB_OUTPUT"
+        echo "log_file=$log_file" >> "$GITHUB_OUTPUT"
+        exit 0
+
     - name: Terraform validate
-      if: ${{ inputs.command == 'validate' || inputs.run-validate == 'true' }}
+      if: ${{ (inputs.command == 'validate' || inputs.run-validate == 'true') && inputs.command != 'plan' }}
       shell: bash
       working-directory: ${{ inputs.working-directory }}
       run: |
         set -euo pipefail
         terraform validate -no-color ${{ inputs.validate-args }}
 
+    - name: Install Checkov
+      if: ${{ inputs.command == 'plan' && inputs.checkov-enabled == 'true' }}
+      shell: bash
+      run: |
+        set -euo pipefail
+        python -m pip install --upgrade pip
+        python -m pip install checkov
+
+    - name: Checkov scan
+      if: ${{ inputs.command == 'plan' && inputs.checkov-enabled == 'true' }}
+      id: checkov
+      continue-on-error: true
+      shell: bash
+      working-directory: ${{ inputs.working-directory }}
+      run: |
+        set -euo pipefail
+        log_file="${RUNNER_TEMP:-/tmp}/checkov.json"
+        repo_root="$(git rev-parse --show-toplevel 2>/dev/null || pwd)"
+        var_file="${{ inputs.checkov-var-file }}"
+        var_path="${repo_root}/${var_file}"
+        set +e
+        if [ -n "$var_file" ] && [ -f "$var_path" ]; then
+          checkov -d "$(pwd)" --framework "${{ inputs.checkov-framework }}" --output json --var-file "$var_path" > "$log_file"
+        else
+          checkov -d "$(pwd)" --framework "${{ inputs.checkov-framework }}" --output json > "$log_file"
+        fi
+        exit_code=$?
+        set -e
+        echo "exit_code=$exit_code" >> "$GITHUB_OUTPUT"
+        echo "log_file=$log_file" >> "$GITHUB_OUTPUT"
+        exit 0
+
+    - name: Checkov gate
+      if: ${{ inputs.command == 'plan' && inputs.checkov-enabled == 'true' }}
+      id: checkov_gate
+      shell: bash
+      env:
+        CHECKOV_JSON: ${{ steps.checkov.outputs.log_file }}
+        FAIL_SEVERITIES: ${{ inputs.checkov-fail-severities }}
+      run: |
+        set -euo pipefail
+        if [ -z "${CHECKOV_JSON:-}" ] || [ ! -f "$CHECKOV_JSON" ]; then
+          echo "gate_failed=false" >> "$GITHUB_OUTPUT"
+          echo "fail_severities=" >> "$GITHUB_OUTPUT"
+          exit 0
+        fi
+        node <<'NODE' >> "$GITHUB_OUTPUT"
+        const fs = require("fs");
+        const path = process.env.CHECKOV_JSON;
+        const failLevels = (process.env.FAIL_SEVERITIES || "")
+          .split(",")
+          .map((item) => item.trim().toUpperCase())
+          .filter(Boolean);
+        let data;
+        try {
+          data = JSON.parse(fs.readFileSync(path, "utf8"));
+        } catch (error) {
+          console.log("gate_failed=false");
+          console.log("fail_severities=");
+          process.exit(0);
+        }
+        const results = data && data.results ? data.results : data;
+        const failed = Array.isArray(results.failed_checks) ? results.failed_checks : [];
+        const matched = failed.filter((check) => {
+          const raw = (check.severity || check.severity_level || "UNKNOWN");
+          return failLevels.includes(String(raw).toUpperCase());
+        });
+        const gateFailed = matched.length > 0;
+        process.stdout.write(`gate_failed=${gateFailed ? "true" : "false"}\n`);
+        process.stdout.write(`fail_severities=${failLevels.join(",")}\n`);
+        NODE
+
     - name: Terraform plan
-      if: ${{ inputs.command == 'plan' }}
+      if: >-
+        ${{ inputs.command == 'plan' &&
+            (inputs.validate-on-plan != 'true' ||
+             steps.validate.outputs.exit_code == '' ||
+             steps.validate.outputs.exit_code == '0') }}
       id: plan
       shell: bash
       working-directory: ${{ inputs.working-directory }}
@@ -211,9 +332,7 @@ runs:
           set -e
         fi
 
-        if [ "$exit_code" -eq 1 ]; then
-          exit 1
-        fi
+        exit 0
 
     - name: Terraform apply
       if: ${{ inputs.command == 'apply' }}
@@ -230,10 +349,12 @@ runs:
 
     - name: Terraform summary
       if: ${{ always() && (inputs.command == 'plan' || inputs.command == 'apply') && inputs.emit-summary == 'true' }}
+      id: summary
       shell: bash
       working-directory: ${{ inputs.working-directory }}
       env:
         COMMAND: ${{ inputs.command }}
+        WORKING_DIRECTORY: ${{ inputs.working-directory }}
         PLAN_EXIT_CODE: ${{ steps.plan.outputs.plan_exit_code }}
         PLAN_HAS_CHANGES: ${{ steps.plan.outputs.plan_has_changes }}
         PLAN_ADD: ${{ steps.plan.outputs.plan_add }}
@@ -241,6 +362,16 @@ runs:
         PLAN_DESTROY: ${{ steps.plan.outputs.plan_destroy }}
         PLAN_TEXT_FILE: ${{ steps.plan.outputs.plan_text_file }}
         APPLY_OUTCOME: ${{ steps.apply.outcome }}
+        VALIDATE_EXIT_CODE: ${{ steps.validate.outputs.exit_code }}
+        VALIDATE_OUTCOME: ${{ steps.validate.outcome }}
+        VALIDATE_LOG_FILE: ${{ steps.validate.outputs.log_file }}
+        CHECKOV_ENABLED: ${{ inputs.checkov-enabled }}
+        VALIDATE_ON_PLAN: ${{ inputs.validate-on-plan }}
+        CHECKOV_EXIT_CODE: ${{ steps.checkov.outputs.exit_code }}
+        CHECKOV_OUTCOME: ${{ steps.checkov.outcome }}
+        CHECKOV_LOG_FILE: ${{ steps.checkov.outputs.log_file }}
+        CHECKOV_GATE_FAILED: ${{ steps.checkov_gate.outputs.gate_failed }}
+        CHECKOV_GATE_SEVERITIES: ${{ steps.checkov_gate.outputs.fail_severities }}
         EMIT_RAW_PLAN: ${{ inputs.emit-raw-plan }}
         EMIT_FULL_PLAN: ${{ inputs.emit-full-plan }}
         SUMMARY_MAX_LINES: ${{ inputs.summary-max-lines }}
@@ -248,6 +379,7 @@ runs:
         set -euo pipefail
 
         command="${COMMAND:-plan}"
+        working_dir="${WORKING_DIRECTORY:-.}"
         plan_add="${PLAN_ADD:-}"
         plan_change="${PLAN_CHANGE:-}"
         plan_destroy="${PLAN_DESTROY:-}"
@@ -260,6 +392,164 @@ runs:
           emit_raw_plan="true"
         fi
         max_lines_per_resource="${SUMMARY_MAX_LINES:-80}"
+
+        summary_file="${RUNNER_TEMP:-/tmp}/terraform-summary.md"
+        comment_file="${RUNNER_TEMP:-/tmp}/terraform-comment.md"
+        : > "$summary_file"
+        : > "$comment_file"
+
+        path_label="$working_dir"
+        if [ -z "$path_label" ] || [ "$path_label" = "." ]; then
+          path_label="root"
+        fi
+        comment_slug="$(printf '%s' "$path_label" | tr '/\\' '-' | tr -c 'A-Za-z0-9._-' '-' | tr -s '-')"
+        comment_marker="<!-- terraform-plan:${comment_slug} -->"
+        run_url="https://github.com/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}"
+
+        validate_exit="${VALIDATE_EXIT_CODE:-}"
+        validate_outcome="${VALIDATE_OUTCOME:-}"
+        validate_log="${VALIDATE_LOG_FILE:-}"
+        validate_on_plan="${VALIDATE_ON_PLAN:-true}"
+        validate_status="skipped"
+        validate_icon=":fast_forward:"
+        validate_detail="skipped"
+        if [ "$command" = "plan" ] && [ "$validate_on_plan" = "true" ] && { [ -n "$validate_exit" ] || [ -n "$validate_outcome" ]; }; then
+          if [ "$validate_exit" = "0" ] || [ "$validate_outcome" = "success" ]; then
+            validate_status="passed"
+            validate_icon=":heavy_check_mark:"
+            validate_detail="required"
+          else
+            validate_status="failed"
+            validate_icon=":x:"
+            validate_detail="required"
+          fi
+        fi
+
+        checkov_enabled="${CHECKOV_ENABLED:-false}"
+        checkov_exit="${CHECKOV_EXIT_CODE:-}"
+        checkov_outcome="${CHECKOV_OUTCOME:-}"
+        checkov_log="${CHECKOV_LOG_FILE:-}"
+        checkov_gate_failed="${CHECKOV_GATE_FAILED:-false}"
+        checkov_gate_severities="${CHECKOV_GATE_SEVERITIES:-}"
+        checkov_status="skipped"
+        checkov_icon=":fast_forward:"
+        checkov_detail="disabled"
+        show_checks_table="false"
+        checkov_summary_file="${RUNNER_TEMP:-/tmp}/checkov-summary.md"
+        checkov_comment_file="${RUNNER_TEMP:-/tmp}/checkov-comment.txt"
+        : > "$checkov_summary_file"
+        : > "$checkov_comment_file"
+
+        if [ "$command" = "plan" ] && { [ "$validate_on_plan" = "true" ] || [ "$checkov_enabled" = "true" ]; }; then
+          show_checks_table="true"
+        fi
+
+        if [ "$command" = "plan" ] && [ "$checkov_enabled" = "true" ]; then
+          checkov_detail="advisory"
+          if [ -n "$checkov_log" ] && [ -f "$checkov_log" ]; then
+            CHECKOV_LOG_FILE="$checkov_log" CHECKOV_SUMMARY_FILE="$checkov_summary_file" CHECKOV_COMMENT_FILE="$checkov_comment_file" node <<'NODE'
+            const fs = require("fs");
+            const logPath = process.env.CHECKOV_LOG_FILE;
+            const summaryPath = process.env.CHECKOV_SUMMARY_FILE;
+            const commentPath = process.env.CHECKOV_COMMENT_FILE;
+            if (!logPath || !fs.existsSync(logPath)) {
+              process.exit(0);
+            }
+            let data;
+            try {
+              data = JSON.parse(fs.readFileSync(logPath, "utf8"));
+            } catch (error) {
+              fs.writeFileSync(summaryPath, "Unable to parse Checkov JSON output.");
+              fs.writeFileSync(commentPath, "parse_error");
+              process.exit(0);
+            }
+            const results = data && data.results ? data.results : data;
+            const failed = Array.isArray(results.failed_checks) ? results.failed_checks : [];
+            const passed = Array.isArray(results.passed_checks) ? results.passed_checks : [];
+            const skipped = Array.isArray(results.skipped_checks) ? results.skipped_checks : [];
+            const severityOrder = ["CRITICAL", "HIGH", "MEDIUM", "LOW", "INFO", "UNKNOWN"];
+            const countSeverities = (checks) => {
+              const counts = { CRITICAL: 0, HIGH: 0, MEDIUM: 0, LOW: 0, INFO: 0, UNKNOWN: 0 };
+              (checks || []).forEach((check) => {
+                const raw = (check.severity || check.severity_level || "UNKNOWN");
+                const key = counts.hasOwnProperty(String(raw).toUpperCase()) ? String(raw).toUpperCase() : "UNKNOWN";
+                counts[key] += 1;
+              });
+              return counts;
+            };
+            const failedCounts = countSeverities(failed);
+            const passedCounts = countSeverities(passed);
+            const skippedCounts = countSeverities(skipped);
+            const lines = [
+              "| Severity | Passed | Failed | Skipped |",
+              "| --- | --- | --- | --- |",
+            ];
+            severityOrder.forEach((level) => {
+              lines.push(`| ${level} | ${passedCounts[level]} | ${failedCounts[level]} | ${skippedCounts[level]} |`);
+            });
+            let details = [];
+            if (failed.length) {
+              const limit = 50;
+              details.push("");
+              details.push("<details>");
+              details.push("<summary>Failed checks</summary>");
+              details.push("");
+              failed.slice(0, limit).forEach((check) => {
+                const id = String(check.check_id || "UNKNOWN").trim();
+                const name = String(check.check_name || "Unnamed check").trim();
+                const severity = String(check.severity || check.severity_level || "UNKNOWN").toUpperCase();
+                const resource = String(check.resource || "n/a").trim();
+                details.push(`- ${id} (${severity}) - ${name} - ${resource}`);
+              });
+              if (failed.length > limit) {
+                details.push(`- ... (${failed.length - limit} more)`);
+              }
+              details.push("</details>");
+            }
+            if (skipped.length) {
+              details.push("");
+              details.push("<details>");
+              details.push("<summary>Skipped checks</summary>");
+              details.push("");
+              skipped.slice(0, 25).forEach((check) => {
+                const id = String(check.check_id || "UNKNOWN").trim();
+                const name = String(check.check_name || "Unnamed check").trim();
+                details.push(`- ${id} - ${name}`);
+              });
+              if (skipped.length > 25) {
+                details.push(`- ... (${skipped.length - 25} more)`);
+              }
+              details.push("</details>");
+            }
+            fs.writeFileSync(summaryPath, lines.concat(details).join("\n") + "\n");
+            const commentLine = severityOrder.map((level) => `${level}:${failedCounts[level]}`).join(" ");
+            fs.writeFileSync(commentPath, commentLine + "\n");
+            NODE
+          fi
+          counts_line="$(tr -d '\n' < "$checkov_comment_file" 2>/dev/null || true)"
+          if [ -n "$counts_line" ] && [ "$counts_line" != "parse_error" ]; then
+            checkov_detail="$counts_line"
+          elif [ "$counts_line" = "parse_error" ]; then
+            checkov_detail="parse_error"
+          fi
+          if [ "$checkov_gate_failed" = "true" ]; then
+            checkov_status="failed"
+            checkov_icon=":x:"
+            if [ -n "$checkov_gate_severities" ]; then
+              checkov_detail="blocked (${checkov_gate_severities})${checkov_detail:+ - ${checkov_detail}}"
+            else
+              checkov_detail="blocked${checkov_detail:+ - ${checkov_detail}}"
+            fi
+          elif [ -n "$checkov_exit" ] && [ "$checkov_exit" != "0" ]; then
+            checkov_status="failures"
+            checkov_icon=":warning:"
+            checkov_detail="${checkov_detail:-advisory}"
+          else
+            checkov_status="passed"
+            checkov_icon=":heavy_check_mark:"
+            checkov_detail="${checkov_detail:-advisory}"
+          fi
+        fi
 
         if [ -z "$plan_text_file" ] || [ ! -f "$plan_text_file" ]; then
           if [ -f "terraform.plan.txt" ]; then
@@ -290,7 +580,7 @@ runs:
         plan_destroy="${plan_destroy:-?}"
 
         if [ "$command" = "plan" ]; then
-          header="### Terraform pre-check"
+          header="### Terraform plan"
           has_plan_summary="false"
           has_errors="false"
           if [ -f "$plan_text_file" ]; then
@@ -303,7 +593,9 @@ runs:
               fi
             fi
           fi
-          if [ "$plan_has_changes" = "true" ] || { [ "$plan_exit_code" = "1" ] && [ "$has_plan_summary" = "true" ] && [ "$has_errors" = "false" ]; }; then
+          if [ "$validate_status" = "failed" ]; then
+            status_line=":x: Terraform plan - blocked (validation failed)"
+          elif [ "$plan_has_changes" = "true" ] || { [ "$plan_exit_code" = "1" ] && [ "$has_plan_summary" = "true" ] && [ "$has_errors" = "false" ]; }; then
             status_line=":heavy_check_mark: Terraform plan - changes detected (required)"
           elif [ "$plan_exit_code" = "1" ]; then
             status_line=":x: Terraform plan - failed (required)"
@@ -324,16 +616,70 @@ runs:
           echo ""
           echo "$status_line"
           echo ""
+          if [ "$command" = "plan" ] && [ "$show_checks_table" = "true" ]; then
+            echo "| Check | Status | Details |"
+            echo "| --- | --- | --- |"
+            echo "| Terraform validate | ${validate_icon} ${validate_status} | ${validate_detail} |"
+            echo "| Checkov scan | ${checkov_icon} ${checkov_status} | ${checkov_detail} |"
+            echo ""
+          fi
           echo "| Add | Change | Destroy |"
           echo "| --- | --- | --- |"
           echo "| ${plan_add} | ${plan_change} | ${plan_destroy} |"
-        } >> "$GITHUB_STEP_SUMMARY"
+        } >> "$summary_file"
+
+        if [ "$command" = "plan" ]; then
+          {
+            echo "${comment_marker}"
+            echo "### Terraform plan (${path_label})"
+            echo ""
+            echo "$status_line"
+            echo ""
+            if [ "$show_checks_table" = "true" ]; then
+              echo "| Check | Status | Details |"
+              echo "| --- | --- | --- |"
+              echo "| Terraform validate | ${validate_icon} ${validate_status} | ${validate_detail} |"
+              echo "| Checkov scan | ${checkov_icon} ${checkov_status} | ${checkov_detail} |"
+              echo ""
+            fi
+            echo "| Add | Change | Destroy |"
+            echo "| --- | --- | --- |"
+            echo "| ${plan_add} | ${plan_change} | ${plan_destroy} |"
+            echo ""
+            echo "Run: [${GITHUB_RUN_ID}](${run_url})"
+          } >> "$comment_file"
+        fi
+
+        if [ "$command" = "plan" ] && [ "$validate_status" = "failed" ] && [ -n "$validate_log" ] && [ -f "$validate_log" ]; then
+          {
+            echo ""
+            echo "<details>"
+            echo "<summary>Terraform validate output</summary>"
+            echo ""
+            echo '```'
+            cat "$validate_log"
+            echo '```'
+            echo "</details>"
+          } >> "$summary_file"
+        fi
+
+        if [ "$command" = "plan" ] && [ -s "$checkov_summary_file" ]; then
+          {
+            echo ""
+            echo "### Checkov scan"
+            echo ""
+            cat "$checkov_summary_file"
+          } >> "$summary_file"
+        fi
 
         if [ ! -f "$plan_text_file" ]; then
           {
             echo ""
             echo "_Plan output not available._"
-          } >> "$GITHUB_STEP_SUMMARY"
+          } >> "$summary_file"
+          cat "$summary_file" >> "$GITHUB_STEP_SUMMARY"
+          echo "comment_file=$comment_file" >> "$GITHUB_OUTPUT"
+          echo "comment_marker=$comment_marker" >> "$GITHUB_OUTPUT"
           exit 0
         fi
 
@@ -360,7 +706,7 @@ runs:
             cat "$warnings_file"
             echo '```'
             echo "</details>"
-          } >> "$GITHUB_STEP_SUMMARY"
+          } >> "$summary_file"
         fi
 
         resource_details="${RUNNER_TEMP:-/tmp}/terraform-resource-changes.md"
@@ -485,7 +831,7 @@ runs:
           else
             echo "_No drift detected._"
           fi
-        } >> "$GITHUB_STEP_SUMMARY"
+        } >> "$summary_file"
 
         {
           echo ""
@@ -498,7 +844,7 @@ runs:
           else
             echo "_Resource changes summary unavailable._"
           fi
-        } >> "$GITHUB_STEP_SUMMARY"
+        } >> "$summary_file"
 
         if [ "$emit_raw_plan" = "true" ]; then
           {
@@ -512,8 +858,122 @@ runs:
             cat "$plan_text_file"
             echo '```'
             echo "</details>"
-          } >> "$GITHUB_STEP_SUMMARY"
+          } >> "$summary_file"
         fi
+
+        cat "$summary_file" >> "$GITHUB_STEP_SUMMARY"
+        echo "comment_file=$comment_file" >> "$GITHUB_OUTPUT"
+        echo "comment_marker=$comment_marker" >> "$GITHUB_OUTPUT"
+
+    - name: Terraform PR comment
+      if: ${{ always() && inputs.command == 'plan' && inputs.comment-on-pr == 'true' }}
+      uses: actions/github-script@v7
+      env:
+        COMMENT_FILE: ${{ steps.summary.outputs.comment_file }}
+        COMMENT_MARKER: ${{ steps.summary.outputs.comment_marker }}
+        PR_NUMBER: ${{ inputs.pr-number }}
+      with:
+        script: |
+          const fs = require("fs");
+          const owner = context.repo.owner;
+          const repo = context.repo.repo;
+          const prNumberInput = process.env.PR_NUMBER;
+          let issue_number = null;
+          let pr = null;
+          if (prNumberInput) {
+            issue_number = Number(prNumberInput);
+          } else if (context.payload.pull_request) {
+            pr = context.payload.pull_request;
+            issue_number = pr.number;
+          }
+          if (!issue_number) {
+            core.info("No PR context or PR number; skipping comment.");
+            return;
+          }
+
+          if (!pr) {
+            const response = await github.rest.pulls.get({
+              owner,
+              repo,
+              pull_number: issue_number,
+            });
+            pr = response.data;
+          }
+          const isFork = pr.head.repo.full_name !== `${owner}/${repo}`;
+          if (isFork) {
+            core.info("Skipping PR comment for forked PR.");
+            return;
+          }
+
+          const commentFile = process.env.COMMENT_FILE;
+          if (!commentFile || !fs.existsSync(commentFile)) {
+            core.info("Comment body file missing; skipping.");
+            return;
+          }
+
+          const marker = process.env.COMMENT_MARKER || "<!-- terraform-plan -->";
+          let body = fs.readFileSync(commentFile, "utf8").trim();
+          if (!body.includes(marker)) {
+            body = `${marker}\n${body}`;
+          }
+
+          const comments = await github.paginate(github.rest.issues.listComments, {
+            owner,
+            repo,
+            issue_number,
+            per_page: 100,
+          });
+          const existing = comments.find((comment) => (comment.body || "").includes(marker));
+
+          if (existing) {
+            await github.rest.issues.updateComment({
+              owner,
+              repo,
+              comment_id: existing.id,
+              body,
+            });
+          } else {
+            await github.rest.issues.createComment({
+              owner,
+              repo,
+              issue_number,
+              body,
+            });
+          }
+
+    - name: Fail if prechecks or plan failed
+      if: ${{ always() && inputs.command == 'plan' }}
+      shell: bash
+      env:
+        PLAN_EXIT_CODE: ${{ steps.plan.outputs.plan_exit_code }}
+        VALIDATE_EXIT_CODE: ${{ steps.validate.outputs.exit_code }}
+        CHECKOV_GATE_FAILED: ${{ steps.checkov_gate.outputs.gate_failed }}
+        CHECKOV_ENABLED: ${{ inputs.checkov-enabled }}
+        VALIDATE_ON_PLAN: ${{ inputs.validate-on-plan }}
+      run: |
+        set -euo pipefail
+        plan_exit="${PLAN_EXIT_CODE:-}"
+        validate_exit="${VALIDATE_EXIT_CODE:-}"
+        checkov_gate="${CHECKOV_GATE_FAILED:-false}"
+        checkov_enabled="${CHECKOV_ENABLED:-false}"
+        validate_on_plan="${VALIDATE_ON_PLAN:-true}"
+
+        if [ "$validate_on_plan" = "true" ] && [ -n "$validate_exit" ] && [ "$validate_exit" != "0" ]; then
+          echo "Terraform validate failed."
+          exit 1
+        fi
+
+        if [ "$checkov_enabled" = "true" ] && [ "$checkov_gate" = "true" ]; then
+          echo "Checkov findings exceeded configured thresholds."
+          exit 1
+        fi
+
+        if [ "$plan_exit" = "1" ]; then
+          echo "Terraform plan failed."
+          exit 1
+        fi
+
+        exit 0
 
     - name: Terraform destroy
       if: ${{ inputs.command == 'destroy' }}
