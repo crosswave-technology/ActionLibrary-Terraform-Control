@@ -123,6 +123,9 @@ outputs:
   plan_text_file:
     description: "Absolute path to the rendered plan text."
     value: ${{ steps.plan.outputs.plan_text_file }}
+  plan_log_file:
+    description: "Absolute path to the terraform plan log file."
+    value: ${{ steps.plan.outputs.plan_log_file }}
   trace_file:
     description: "Absolute path to the Terraform trace log file (if generated)."
     value: ${{ steps.plan.outputs.trace_file }}
@@ -280,11 +283,12 @@ runs:
 
         plan_file="$(pwd)/terraform.plan"
         plan_text_file="$(pwd)/terraform.plan.txt"
+        plan_log_file="${RUNNER_TEMP:-/tmp}/terraform-plan.log"
         exit_code=0
 
         set +e
-        terraform plan -no-color -input=false -detailed-exitcode -out="$plan_file" ${{ inputs.plan-args }}
-        exit_code=$?
+        terraform plan -no-color -input=false -detailed-exitcode -out="$plan_file" ${{ inputs.plan-args }} 2>&1 | tee "$plan_log_file"
+        exit_code=${PIPESTATUS[0]}
         set -e
 
         has_changes="false"
@@ -324,6 +328,7 @@ runs:
         echo "plan_summary=$summary" >> "$GITHUB_OUTPUT"
         echo "plan_file=$plan_file" >> "$GITHUB_OUTPUT"
         echo "plan_text_file=$plan_text_file" >> "$GITHUB_OUTPUT"
+        echo "plan_log_file=$plan_log_file" >> "$GITHUB_OUTPUT"
         echo "trace_file=$trace_file" >> "$GITHUB_OUTPUT"
 
         if [ "$exit_code" -eq 1 ] && [ -z "${TF_LOG:-}" ]; then
@@ -361,6 +366,7 @@ runs:
         PLAN_CHANGE: ${{ steps.plan.outputs.plan_change }}
         PLAN_DESTROY: ${{ steps.plan.outputs.plan_destroy }}
         PLAN_TEXT_FILE: ${{ steps.plan.outputs.plan_text_file }}
+        PLAN_LOG_FILE: ${{ steps.plan.outputs.plan_log_file }}
         APPLY_OUTCOME: ${{ steps.apply.outcome }}
         VALIDATE_EXIT_CODE: ${{ steps.validate.outputs.exit_code }}
         VALIDATE_OUTCOME: ${{ steps.validate.outcome }}
@@ -386,12 +392,14 @@ runs:
         plan_exit_code="${PLAN_EXIT_CODE:-}"
         plan_has_changes="${PLAN_HAS_CHANGES:-}"
         plan_text_file="${PLAN_TEXT_FILE:-}"
+        plan_log_file="${PLAN_LOG_FILE:-}"
         apply_outcome="${APPLY_OUTCOME:-}"
         emit_raw_plan="${EMIT_RAW_PLAN:-true}"
         if [ "${EMIT_FULL_PLAN:-false}" = "true" ]; then
           emit_raw_plan="true"
         fi
         max_lines_per_resource="${SUMMARY_MAX_LINES:-80}"
+        max_log_chars=30000
 
         summary_file="${RUNNER_TEMP:-/tmp}/terraform-summary.md"
         comment_file="${RUNNER_TEMP:-/tmp}/terraform-comment.md"
@@ -661,6 +669,42 @@ runs:
             echo '```'
             echo "</details>"
           } >> "$summary_file"
+        fi
+
+        plan_error_excerpt=""
+        if [ -n "$plan_log_file" ] && [ -f "$plan_log_file" ]; then
+          plan_log_excerpt="${RUNNER_TEMP:-/tmp}/terraform-plan-error.log"
+          log_size=$(wc -c < "$plan_log_file" | tr -d ' ')
+          if [ "$log_size" -gt "$max_log_chars" ]; then
+            head -c "$max_log_chars" "$plan_log_file" > "$plan_log_excerpt"
+            printf "\n\n...truncated (%s chars)\n" "$log_size" >> "$plan_log_excerpt"
+          else
+            cp "$plan_log_file" "$plan_log_excerpt"
+          fi
+          plan_error_excerpt="$plan_log_excerpt"
+        fi
+
+        if [ "$command" = "plan" ] && [ "$plan_exit_code" = "1" ] && [ -n "$plan_error_excerpt" ] && [ -f "$plan_error_excerpt" ]; then
+          {
+            echo ""
+            echo "<details>"
+            echo "<summary>Terraform plan error output</summary>"
+            echo ""
+            echo '```'
+            cat "$plan_error_excerpt"
+            echo '```'
+            echo "</details>"
+          } >> "$summary_file"
+          {
+            echo ""
+            echo "<details>"
+            echo "<summary>Terraform plan error output</summary>"
+            echo ""
+            echo '```'
+            cat "$plan_error_excerpt"
+            echo '```'
+            echo "</details>"
+          } >> "$comment_file"
         fi
 
         if [ "$command" = "plan" ] && [ -s "$checkov_summary_file" ]; then
