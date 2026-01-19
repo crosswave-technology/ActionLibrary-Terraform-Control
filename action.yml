@@ -524,7 +524,7 @@ runs:
             fs.writeFileSync(summaryPath, lines.concat(details).join("\n") + "\n");
             const commentLine = severityOrder.map((level) => `${level}:${failedCounts[level]}`).join(" ");
             fs.writeFileSync(commentPath, commentLine + "\n");
-            NODE
+        NODE
           fi
           counts_line="$(tr -d '\n' < "$checkov_comment_file" 2>/dev/null || true)"
           if [ -n "$counts_line" ] && [ "$counts_line" != "parse_error" ]; then
