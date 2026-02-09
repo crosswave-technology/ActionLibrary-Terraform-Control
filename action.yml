@@ -1011,11 +1011,11 @@ runs:
             return "unknown"
           }
           function icon_for(action) {
-            if (action == "add") return ":heavy_plus_sign:"
-            if (action == "update") return ":heavy_minus_sign:"
-            if (action == "replace") return ":heavy_multiplication_x:"
-            if (action == "remove") return ":x:"
-            if (action == "read") return ":mag:"
+            if (action == "add") return ":green_circle:"
+            if (action == "update") return ":yellow_circle:"
+            if (action == "replace") return ":orange_circle:"
+            if (action == "remove") return ":red_circle:"
+            if (action == "read") return ":blue_circle:"
             return ":grey_question:"
           }
           function address_for(header, addr) {
