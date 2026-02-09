@@ -884,13 +884,16 @@ runs:
               echo "</details>"
               echo ""
             fi
-            echo "### Applied resources"
+            echo "<details open>"
+            echo "<summary><strong>Applied resources</strong></summary>"
             echo ""
             if [ -s "$apply_changes_file" ]; then
               cat "$apply_changes_file"
             else
               echo "_No applied resources detected._"
             fi
+            echo ""
+            echo "</details>"
           } >> "$summary_file"
 
           cat "$summary_file" >> "$GITHUB_STEP_SUMMARY"
@@ -1109,18 +1112,22 @@ runs:
 
         {
           echo ""
-          echo "### Drift detected"
+          echo "<details>"
+          echo "<summary><strong>Drift detected</strong></summary>"
           echo ""
           if [ -s "$drift_details" ]; then
             cat "$drift_details"
           else
             echo "_No drift detected._"
           fi
+          echo ""
+          echo "</details>"
         } >> "$summary_file"
 
         {
           echo ""
-          echo "### Resource changes"
+          echo "<details open>"
+          echo "<summary><strong>Resource changes</strong></summary>"
           echo ""
           if [ -s "$resource_details" ]; then
             cat "$resource_details"
@@ -1129,6 +1136,8 @@ runs:
           else
             echo "_Resource changes summary unavailable._"
           fi
+          echo ""
+          echo "</details>"
         } >> "$summary_file"
 
         if [ "$emit_raw_plan" = "true" ]; then
