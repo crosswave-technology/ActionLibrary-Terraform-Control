@@ -10,7 +10,7 @@ inputs:
     required: false
     default: "plan"
   terraform-version:
-    description: "Terraform version to install if not present (e.g. 1.6.6)."
+    description: "Terraform version to install if not present (e.g. 1.7.5)."
     required: false
     default: ""
   init-args:

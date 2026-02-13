@@ -42,13 +42,13 @@ jobs:
         id: app_token
         shell: bash
         env:
-          APP_ID: ${{ secrets.NEXUS_APP_ID }}
-          APP_INSTALLATION_ID: ${{ secrets.NEXUS_AUTOMATION_APP_INSTALLATION_ID }}
-          APP_PRIVATE_KEY: ${{ secrets.NEXUS_AUTOMATION_APP_PRIVATE_KEY }}
+          APP_ID: ${{ secrets.GNM_APP_ID }}
+          APP_INSTALLATION_ID: ${{ secrets.GNM_APP_INSTALLATION_ID }}
+          APP_PRIVATE_KEY: ${{ secrets.GNM_APP_PRIVATE_KEY }}
         run: |
           set -euo pipefail
           if [ -z "${APP_ID:-}" ] || [ -z "${APP_INSTALLATION_ID:-}" ] || [ -z "${APP_PRIVATE_KEY:-}" ]; then
-            echo "Missing app credentials (NEXUS_APP_ID, NEXUS_AUTOMATION_APP_INSTALLATION_ID, NEXUS_AUTOMATION_APP_PRIVATE_KEY)." >&2
+            echo "Missing app credentials (GNM_APP_ID, GNM_APP_INSTALLATION_ID, GNM_APP_PRIVATE_KEY)." >&2
             exit 1
           fi
           pem_file=$(mktemp)
@@ -167,13 +167,13 @@ jobs:
         id: app_token
         shell: bash
         env:
-          APP_ID: ${{ secrets.NEXUS_APP_ID }}
-          APP_INSTALLATION_ID: ${{ secrets.NEXUS_AUTOMATION_APP_INSTALLATION_ID }}
-          APP_PRIVATE_KEY: ${{ secrets.NEXUS_AUTOMATION_APP_PRIVATE_KEY }}
+          APP_ID: ${{ secrets.GNM_APP_ID }}
+          APP_INSTALLATION_ID: ${{ secrets.GNM_APP_INSTALLATION_ID }}
+          APP_PRIVATE_KEY: ${{ secrets.GNM_APP_PRIVATE_KEY }}
         run: |
           set -euo pipefail
           if [ -z "${APP_ID:-}" ] || [ -z "${APP_INSTALLATION_ID:-}" ] || [ -z "${APP_PRIVATE_KEY:-}" ]; then
-            echo "Missing app credentials (NEXUS_APP_ID, NEXUS_AUTOMATION_APP_INSTALLATION_ID, NEXUS_AUTOMATION_APP_PRIVATE_KEY)." >&2
+            echo "Missing app credentials (GNM_APP_ID, GNM_APP_INSTALLATION_ID, GNM_APP_PRIVATE_KEY)." >&2
             exit 1
           fi
           pem_file=$(mktemp)
@@ -227,13 +227,13 @@ jobs:
         id: app_token
         shell: bash
         env:
-          APP_ID: ${{ secrets.NEXUS_APP_ID }}
-          APP_INSTALLATION_ID: ${{ secrets.NEXUS_AUTOMATION_APP_INSTALLATION_ID }}
-          APP_PRIVATE_KEY: ${{ secrets.NEXUS_AUTOMATION_APP_PRIVATE_KEY }}
+          APP_ID: ${{ secrets.GNM_APP_ID }}
+          APP_INSTALLATION_ID: ${{ secrets.GNM_APP_INSTALLATION_ID }}
+          APP_PRIVATE_KEY: ${{ secrets.GNM_APP_PRIVATE_KEY }}
         run: |
           set -euo pipefail
           if [ -z "${APP_ID:-}" ] || [ -z "${APP_INSTALLATION_ID:-}" ] || [ -z "${APP_PRIVATE_KEY:-}" ]; then
-            echo "Missing app credentials (NEXUS_APP_ID, NEXUS_AUTOMATION_APP_INSTALLATION_ID, NEXUS_AUTOMATION_APP_PRIVATE_KEY)." >&2
+            echo "Missing app credentials (GNM_APP_ID, GNM_APP_INSTALLATION_ID, GNM_APP_PRIVATE_KEY)." >&2
             exit 1
           fi
           pem_file=$(mktemp)
