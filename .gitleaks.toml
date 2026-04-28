@@ -1,0 +1,20 @@
+# .gitleaks.toml — Allowlist for AWS-IAM-Library
+# Add rule-specific or path-specific exclusions here.
+# Never use this to suppress real secrets — only genuine false positives.
+
+title = "ActionLibrary-Terraform-Control gitleaks config"
+
+[allowlist]
+description = "Global allowlists"
+
+# AWS account IDs appear in resource ARNs and are not secrets
+regexes = [
+  # AWS account IDs in ARN format — not a secret
+  '''arn:aws:[a-z0-9-]+:[a-z0-9-]*:\d{12}:''',
+]
+
+# Ignore generated/vendor paths
+paths = [
+  '''.terraform/''',
+  '''\.terraform\.lock\.hcl''',
+]
