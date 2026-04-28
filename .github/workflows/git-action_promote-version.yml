@@ -1,4 +1,6 @@
-name: Promote Version
+name: "GitHub: Promote Version"
+run-name: "Promote Version: ${{ github.ref_name }}"
+
 permissions:
   contents: write
   pull-requests: write
@@ -74,7 +76,7 @@ jobs:
           token: ${{ steps.app_token.outputs.token }}
 
       - name: Discover PR Via Commit
-        uses: actions/github-script@v6
+        uses: actions/github-script@v7
         id: lookup
         with:
           github-token: ${{ steps.app_token.outputs.token }}
@@ -243,14 +245,14 @@ jobs:
 
       - name: Version Management
         id: promote_version
-        uses: crosswave-technology/ActionLibrary-Version-Management@master
+        uses: crosswave-technology/ActionLibrary-Version-Management@v1.0.0
         with:
           pr_number: ${{ needs.discover.outputs.pr_number }}
           version_file: ${{ matrix.version_file }}
           push_changes: false
 
       - name: Create Logs
-        uses: crosswave-technology/ActionLibrary-Create-Log@master
+        uses: crosswave-technology/ActionLibrary-Create-Log@v1.0.0
         if: ${{ needs.discover.outputs.pr_number != '' }}
         with:
           pr_number: ${{ needs.discover.outputs.pr_number }}
@@ -258,7 +260,7 @@ jobs:
           version_file: ${{ matrix.version_file }}
 
       - name: Generate ChangeLog
-        uses: crosswave-technology/ActionLibrary-Generate-Changelog@master
+        uses: crosswave-technology/ActionLibrary-Generate-Changelog@v1.0.0
         if: ${{ needs.discover.outputs.pr_number != '' }}
         with:
           pr_number: ${{ needs.discover.outputs.pr_number }}
