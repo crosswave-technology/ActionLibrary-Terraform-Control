@@ -1,4 +1,4 @@
-name: Create Release
+name: "GitHub: Create Release"
 run-name: >-
   ${{ startsWith(github.ref, 'refs/tags/')
       && format('Release: {0}', github.ref_name)
@@ -26,13 +26,149 @@ on:
       - 'v[0-9]+.[0-9]+.[0-9]+-alpha.[0-9]+'
       - '*-v[0-9]+.[0-9]+.[0-9]+-alpha.[0-9]+'
 
+  workflow_dispatch:
+    inputs:
+      release_type:
+        description: 'Release type (alpha for testing, hotfix for urgent production patches)'
+        required: true
+        type: choice
+        default: 'alpha'
+        options:
+          - alpha
+          - hotfix
+      include_branch_name:
+        description: 'Include branch name in tag (recommended for non-default branches to avoid collisions)'
+        required: false
+        type: boolean
+        default: false
+      package_path:
+        description: 'Package path (leave empty for root)'
+        required: false
+        type: string
+        default: '.'
+
 env:
   ARTIFACTS_ASSETS_PATH: "artifacts/assets"
 
 jobs:
+  create-prerelease-tag:
+    name: Create Pre-release Tag
+    runs-on: ubuntu-latest
+    if: ${{ github.event_name == 'workflow_dispatch' }}
+    steps:
+      - name: Generate GitHub App Token
+        id: app_token
+        shell: bash
+        env:
+          APP_ID: ${{ secrets.GNM_APP_ID }}
+          APP_INSTALLATION_ID: ${{ secrets.GNM_APP_INSTALLATION_ID }}
+          APP_PRIVATE_KEY: ${{ secrets.GNM_APP_PRIVATE_KEY }}
+        run: |
+          set -euo pipefail
+          if [ -z "${APP_ID:-}" ] || [ -z "${APP_INSTALLATION_ID:-}" ] || [ -z "${APP_PRIVATE_KEY:-}" ]; then
+            echo "Missing app credentials (GNM_APP_ID, GNM_APP_INSTALLATION_ID, GNM_APP_PRIVATE_KEY)." >&2
+            exit 1
+          fi
+          pem_file=$(mktemp)
+          trap 'rm -f "$pem_file"' EXIT
+          printf '%s' "$APP_PRIVATE_KEY" > "$pem_file"
+          iat=$(date +%s)
+          exp=$((iat + 540))
+          header=$(printf '{"alg":"RS256","typ":"JWT"}' | openssl base64 -A | tr '+/' '-_' | tr -d '=')
+          payload=$(printf '{"iat":%d,"exp":%d,"iss":"%s"}' "$iat" "$exp" "$APP_ID" | openssl base64 -A | tr '+/' '-_' | tr -d '=')
+          unsigned="$header.$payload"
+          signature=$(printf '%s' "$unsigned" | openssl dgst -sha256 -sign "$pem_file" | openssl base64 -A | tr '+/' '-_' | tr -d '=')
+          jwt="$unsigned.$signature"
+          token=$(curl -sS -X POST -H "Authorization: Bearer $jwt" -H "Accept: application/vnd.github+json" "https://api.github.com/app/installations/${APP_INSTALLATION_ID}/access_tokens" | jq -r '.token')
+          if [ -z "$token" ] || [ "$token" = "null" ]; then
+            echo "Failed to generate installation token." >&2
+            exit 1
+          fi
+          echo "::add-mask::$token"
+          echo "token=$token" >> "$GITHUB_OUTPUT"
+          echo "GH_TOKEN=$token" >> "$GITHUB_ENV"
+          echo "GITHUB_TOKEN=$token" >> "$GITHUB_ENV"
+
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          token: ${{ steps.app_token.outputs.token }}
+          fetch-depth: 0
+
+      - name: Determine Next Version
+        id: version
+        env:
+          RELEASE_TYPE: ${{ inputs.release_type }}
+          PACKAGE_PATH: ${{ inputs.package_path }}
+          INCLUDE_BRANCH: ${{ inputs.include_branch_name }}
+          CURRENT_BRANCH: ${{ github.ref_name }}
+          GH_TOKEN: ${{ steps.app_token.outputs.token }}
+        run: |
+          set -euo pipefail
+
+          # Read base version from VERSION file
+          version_file="${PACKAGE_PATH}/VERSION"
+          if [ "$PACKAGE_PATH" = "." ]; then
+            version_file="VERSION"
+          fi
+
+          if [ ! -f "$version_file" ]; then
+            echo "VERSION file not found at $version_file"
+            exit 1
+          fi
+
+          base_version=$(tr -d '[:space:]' < "$version_file")
+          echo "Base version: $base_version"
+
+          # Determine tag prefix for subpackages
+          tag_prefix=""
+          if [ "$PACKAGE_PATH" != "." ]; then
+            tag_prefix=$(echo "$PACKAGE_PATH" | tr '[:upper:]' '[:lower:]' | tr '/' '-')
+            tag_prefix="${tag_prefix}-"
+          fi
+
+          # Determine branch suffix (only if include_branch_name is true)
+          branch_suffix=""
+          if [ "$INCLUDE_BRANCH" = "true" ]; then
+            # Sanitize branch name: lowercase, replace / with -, remove invalid chars
+            branch_suffix=$(echo "$CURRENT_BRANCH" | tr '[:upper:]' '[:lower:]' | tr '/' '-' | sed 's/[^a-z0-9-]//g')
+            branch_suffix=".${branch_suffix}"
+            echo "Including branch name in tag: $branch_suffix"
+          fi
+
+          # Build version pattern: v1.6.0-alpha.branch-name. or v1.6.0-alpha.
+          version_base="${tag_prefix}${base_version}-${RELEASE_TYPE}${branch_suffix}."
+
+          # Find highest existing prerelease number for this pattern
+          highest=$(gh release list --limit 100 | grep -oE "${version_base}[0-9]+" | \
+            sed "s/${version_base}//" | sort -rn | head -1 || true)
+
+          if [ -z "$highest" ]; then
+            next_num=1
+          else
+            next_num=$((highest + 1))
+          fi
+
+          new_version="${version_base}${next_num}"
+          echo "new_version=$new_version" >> "$GITHUB_OUTPUT"
+          echo "Next version: $new_version"
+
+      - name: Create and Push Tag
+        env:
+          NEW_VERSION: ${{ steps.version.outputs.new_version }}
+          GH_TOKEN: ${{ steps.app_token.outputs.token }}
+        run: |
+          set -euo pipefail
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git tag -a "$NEW_VERSION" -m "Pre-release: $NEW_VERSION"
+          git push origin "$NEW_VERSION"
+          echo "Created and pushed tag: $NEW_VERSION"
+
   detect-release:
     name: Detect Release
     runs-on: ubuntu-latest
+    if: ${{ github.event_name != 'workflow_dispatch' }}
     outputs:
       should_release: ${{ steps.detect.outputs.should_release }}
       release_version: ${{ steps.detect.outputs.release_version }}
@@ -207,7 +343,7 @@ jobs:
           echo "RELEASE_VERSION=${RELEASE_VERSION}" >> "$GITHUB_ENV"
 
       - name: Create Package
-        uses: crosswave-technology/ActionLibrary-Create-Package@master
+        uses: crosswave-technology/ActionLibrary-Create-Package@v1.0.0
         env:
           GITHUB_TOKEN: ${{ steps.app_token.outputs.token }}
           RELEASE_VERSION: ${{ needs.detect-release.outputs.release_version }}
@@ -257,7 +393,7 @@ jobs:
           echo "GITHUB_TOKEN=$token" >> "$GITHUB_ENV"
 
       - name: Create Release
-        uses: crosswave-technology/ActionLibrary-Create-Release@master
+        uses: crosswave-technology/ActionLibrary-Create-Release@v1.0.0
         env:
           GITHUB_TOKEN: ${{ steps.app_token.outputs.token }}
           GH_TOKEN: ${{ steps.app_token.outputs.token }}
