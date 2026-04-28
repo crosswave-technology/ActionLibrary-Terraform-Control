@@ -1,0 +1,43 @@
+# ═══════════════════════════════════════════════════════════════════════════════
+# Nexus: Repository Deploy
+# ═══════════════════════════════════════════════════════════════════════════════
+# Applies repository configuration via the central GitHub-Nexus-Repository.
+#
+# Triggers:
+#   - Push to master: Applies configuration changes
+#   - Pull request: Plans only (validation)
+#   - Manual dispatch: Plan or apply based on input
+#
+# This file is managed by Terraform via the nexus-control feature.
+# Manual changes will be overwritten on next apply.
+# ═══════════════════════════════════════════════════════════════════════════════
+
+name: "Nexus: Repository Deploy"
+
+permissions:
+  id-token: write
+  contents: read
+
+on:
+  push:
+    paths:
+      - ".github/repo_config.tfvars"
+    branches: [master]
+
+  pull_request:
+    paths:
+      - ".github/repo_config.tfvars"
+
+  workflow_dispatch:
+    inputs:
+      apply:
+        description: "Apply changes (true) or plan only (false)"
+        type: boolean
+        default: false
+
+jobs:
+  nexus-config:
+    uses: crosswave-technology/GitHub-Nexus-Repository/.github/workflows/reusable-module_apply-repo-config.yml@v1.0.0
+    with:
+      apply: ${{ github.event_name == 'push' || (github.event_name == 'workflow_dispatch' && inputs.apply) }}
+    secrets: inherit
