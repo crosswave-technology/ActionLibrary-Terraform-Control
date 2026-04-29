@@ -97,6 +97,10 @@ inputs:
     description: "Display Terraform outputs: all, changes_only, or nothing."
     required: false
     default: "changes_only"
+  git-modules-token:
+    description: "Optional token for cloning private Terraform modules during init. When set, configures git credential helper before terraform init."
+    required: false
+    default: ""
 
 outputs:
   plan_exit_code:
@@ -162,6 +166,14 @@ runs:
         export PATH="$RUNNER_TEMP/terraform-bin:$PATH"
         echo "$RUNNER_TEMP/terraform-bin" >> "$GITHUB_PATH"
         terraform -version
+
+    - name: Configure git for private modules
+      if: ${{ inputs.git-modules-token != '' }}
+      shell: bash
+      env:
+        GIT_MODULES_TOKEN: ${{ inputs.git-modules-token }}
+      run: |
+        git config --global url."https://x-access-token:${GIT_MODULES_TOKEN}@github.com/".insteadOf "https://github.com/"
 
     - name: Terraform Init
       shell: bash
