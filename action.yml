@@ -1173,7 +1173,7 @@ runs:
 
     - name: Terraform PR comment
       if: ${{ always() && inputs.command == 'plan' && inputs.comment-on-pr == 'true' }}
-      uses: actions/github-script@v7
+      uses: actions/github-script@f28e40c7f34bde8b3046d885e986cb6290c5673b # v7
       env:
         COMMENT_FILE: ${{ steps.summary.outputs.comment_file }}
         COMMENT_MARKER: ${{ steps.summary.outputs.comment_marker }}
