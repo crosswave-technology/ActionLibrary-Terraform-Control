@@ -31,7 +31,7 @@ if [ -z "$path_label" ] || [ "$path_label" = "." ]; then
 fi
 comment_slug="$(printf '%s' "$path_label" | tr '/\\' '-' | tr -c 'A-Za-z0-9._-' '-' | tr -s '-')"
 # Determine section ID and whether to use consolidated comment
-comment_section_id="${{ inputs.comment-section-id }}"
+comment_section_id="${COMMENT_SECTION_ID:-}"
 if [ -z "$comment_section_id" ]; then
   comment_section_id="plan-${comment_slug}"
 fi
@@ -472,8 +472,8 @@ if [ "$command" = "plan" ]; then
   } >> "$section_content_file"
 
   # Error block when plan failed â€” uses extracted errors file
-  error_file_path="${{ steps.plan.outputs.plan_error_file }}"
-  error_count_val="${{ steps.plan.outputs.plan_error_count }}"
+  error_file_path="${PLAN_ERROR_FILE:-}"
+  error_count_val="${PLAN_ERROR_COUNT:-}"
   if [ -n "$error_count_val" ] && [ "$error_count_val" != "0" ] && [ -n "$error_file_path" ] && [ -f "$error_file_path" ] && [ -s "$error_file_path" ]; then
     {
       echo ""
