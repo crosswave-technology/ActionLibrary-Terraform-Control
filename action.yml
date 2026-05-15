@@ -439,9 +439,9 @@ runs:
         EMIT_RAW_PLAN: ${{ inputs.emit-raw-plan }}
         EMIT_FULL_PLAN: ${{ inputs.emit-full-plan }}
         SUMMARY_MAX_LINES: ${{ inputs.summary-max-lines }}
-          COMMENT_SECTION_ID: ${{ inputs.comment-section-id }}
-          PLAN_ERROR_FILE: ${{ steps.plan.outputs.plan_error_file }}
-          PLAN_ERROR_COUNT: ${{ steps.plan.outputs.plan_error_count }}
+        COMMENT_SECTION_ID: ${{ inputs.comment-section-id }}
+        PLAN_ERROR_FILE: ${{ steps.plan.outputs.plan_error_file }}
+        PLAN_ERROR_COUNT: ${{ steps.plan.outputs.plan_error_count }}
       run: bash "${{ github.action_path }}/scripts/terraform-summary.sh"
 
     - name: Terraform PR comment
