@@ -9,6 +9,20 @@
 ---
 
 
+## v1.1.3
+
+**Release:** [v1.1.3](https://github.com/crosswave-technology/ActionLibrary-Terraform-Control/releases/tag/v1.1.3)
+**Labels:** Patch
+
+## Problem
+
+The three env vars added in v1.1.2 (COMMENT_SECTION_ID, PLAN_ERROR_FILE, PLAN_ERROR_COUNT) had 10-space indentation instead of 8-space, causing a YAML parse error that failed the Set up job step in all enrolled repos.
+
+## Changes
+
+- ction.yml: Fixed indentation of COMMENT_SECTION_ID, PLAN_ERROR_FILE, and PLAN_ERROR_COUNT in the Terraform summary step env block.
+
+---
 ## v1.1.2
 
 **Release:** [v1.1.2](https://github.com/crosswave-technology/ActionLibrary-Terraform-Control/releases/tag/v1.1.2)
