@@ -8,6 +8,30 @@
 
 ---
 
+
+## v1.1.1
+
+**Release:** [v1.1.1](https://github.com/crosswave-technology/ActionLibrary-Terraform-Control/releases/tag/v1.1.1)
+**Labels:** Patch
+
+## Problem
+
+GitHub Actions enforces a 21,000 character limit on template string values. The Terraform summary step's inline un: script was 34,567 characters, causing all workflows using ActionLibrary-Terraform-Control@v1.1.0 to fail with:
+
+`
+The template is not valid. ... (Line: 442, Col: 12): Exceeded max expression length 21000
+`
+
+## Solution
+
+Extracted the large inline shell script to scripts/terraform-summary.sh. The composite action step now calls it via un: bash "${{ github.action_path }}/scripts/terraform-summary.sh". No functional changes to the script logic.
+
+## Changes
+
+- ction.yml: Replaced 832-line inline un: block with un: bash "${{ github.action_path }}/scripts/terraform-summary.sh".
+- scripts/terraform-summary.sh: New file — extracted summary generation script.
+- VERSION: 1.1.0 → 1.1.1
+- CHANGELOG.md: Added v1.1.1 entry.
 ## v1.1.0
 
 Upgrades the Terraform Control action to commercial-grade PR reporting with a consolidated comment architecture. All plan/pre-check output from a single workflow now lands in one PR comment using named section blocks, eliminating per-action comment clutter.
