@@ -9,6 +9,21 @@
 ---
 
 
+## v1.1.2
+
+**Release:** [v1.1.2](https://github.com/crosswave-technology/ActionLibrary-Terraform-Control/releases/tag/v1.1.2)
+**Labels:** Patch
+
+## Problem
+
+The extracted scripts/terraform-summary.sh in v1.1.1 contained three raw GitHub Actions expressions (inputs.comment-section-id, steps.plan.outputs.plan_error_file, steps.plan.outputs.plan_error_count) that were evaluated when the script was inline YAML but cause a ad substitution exit code 2 when bash executes them from an external file.
+
+## Changes
+
+- scripts/terraform-summary.sh: Replaced the three GHA expressions with bash env var lookups using ${VAR_NAME:-} pattern.
+- ction.yml: Added COMMENT_SECTION_ID, PLAN_ERROR_FILE, and PLAN_ERROR_COUNT to the summary step env block so the values are passed correctly to the external script.
+
+---
 ## v1.1.1
 
 **Release:** [v1.1.1](https://github.com/crosswave-technology/ActionLibrary-Terraform-Control/releases/tag/v1.1.1)
