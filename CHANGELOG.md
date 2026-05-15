@@ -8,6 +8,18 @@
 
 ---
 
+## v1.1.0
+
+Upgrades the Terraform Control action to commercial-grade PR reporting with a consolidated comment architecture. All plan/pre-check output from a single workflow now lands in one PR comment using named section blocks, eliminating per-action comment clutter.
+
+## Changes
+
+- **New input `comment-section-id`** — section ID for consolidated PR comment. Auto-derived from working-directory slug when empty.
+- **New outputs `plan_error_count` / `plan_error_file`** — structured error extraction on plan exit code 1, replacing the TRACE re-run anti-pattern.
+- **Commercial-grade plan summary** — emoji status line (🟢/🟡/🔴), resource counts table, collapsible error details block, Checkov findings section, full-plan diff expander.
+- **Section-replacement comment manager** — upserts only the current section by ID inside the shared `<!-- crosswave-terraform-report -->` comment; size-guarded to 65 kB.
+- **Removed TRACE re-run** — `TF_LOG=TRACE` re-execution on plan failure removed; errors extracted from existing plan log via awk.
+
 ## v1.0.2
 ﻿## Summary
 
