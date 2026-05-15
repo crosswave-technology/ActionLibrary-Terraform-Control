@@ -152,7 +152,7 @@ jobs:
 
       - name: Terraform Plan
         id: plan
-        uses: crosswave-technology/ActionLibrary-Terraform-Control@v1.1.1
+        uses: crosswave-technology/ActionLibrary-Terraform-Control@v1.1.2
         env:
           GITHUB_TOKEN: ${{ steps.app-token.outputs.token }}
         with:
@@ -267,7 +267,7 @@ jobs:
           git config --global url."https://x-access-token:${{ steps.app-token.outputs.token }}@github.com/".insteadOf "https://github.com/"
 
       - name: Terraform Apply
-        uses: crosswave-technology/ActionLibrary-Terraform-Control@v1.1.1
+        uses: crosswave-technology/ActionLibrary-Terraform-Control@v1.1.2
         env:
           GITHUB_TOKEN: ${{ steps.app-token.outputs.token }}
         with:
