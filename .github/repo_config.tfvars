@@ -34,7 +34,6 @@ features = {
   }
   nexus-control = {
     default_branch = "master"
-    nexus_ref      = "v1.0.0"
   }
 }
 
