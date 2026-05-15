@@ -55,7 +55,7 @@ jobs:
         id: app-token
         uses: actions/create-github-app-token@d72941d797fd3113feb6b93fd0dec494b13a2547 # v1
         with:
-          client-id: ${{ secrets.GNM_APP_ID }}
+          app-id: ${{ secrets.GNM_APP_ID }}
           private-key: ${{ secrets.GNM_APP_PRIVATE_KEY }}
           owner: ${{ github.repository_owner }}
 
@@ -96,7 +96,7 @@ jobs:
         run: |
           set -euo pipefail
 
-          if ! aws s3 cp "s3://${{ secrets.STATE_BUCKET_NAME }}/${STATE_KEY}" /tmp/tf_state.json \
+          if ! aws s3 cp "s3://${{ secrets.STATE_BUCKET_NAME }}/$${STATE_KEY}" /tmp/tf_state.json \
               --region "${{ env.AWS_REGION }}" 2>/dev/null; then
             echo "No state file found — nothing to clean up"
             exit 0
@@ -104,51 +104,51 @@ jobs:
 
           ENVS=$(jq -r '[.resources[] | select(.type == "github_repository_environment") |
             .instances[].attributes.environment] | unique | .[]' /tmp/tf_state.json 2>/dev/null || true)
-          if [ -z "${ENVS}" ]; then
+          if [ -z "$${ENVS}" ]; then
             echo "No github_repository_environment resources in state — nothing to clean up"
             exit 0
           fi
 
           STALE_ENVS_JSON="[]"
           while IFS= read -r env_name; do
-            STATUS=$(curl -s -o /dev/null -w "%{http_code}" \
-              -H "Authorization: Bearer ${GH_TOKEN}" \
+            STATUS=$(curl -s -o /dev/null -w "%%{http_code}" \
+              -H "Authorization: Bearer $${GH_TOKEN}" \
               -H "Accept: application/vnd.github+json" \
-              "https://api.github.com/repos/${{ github.repository }}/environments/${env_name}")
-            if [ "${STATUS}" = "403" ] || [ "${STATUS}" = "404" ]; then
-              echo "Environment '${env_name}' not found in GitHub (HTTP ${STATUS}) — marking as stale"
-              STALE_ENVS_JSON=$(echo "${STALE_ENVS_JSON}" | jq --arg env "${env_name}" '. + [$env]')
+              "https://api.github.com/repos/${{ github.repository }}/environments/$${env_name}")
+            if [ "$${STATUS}" = "403" ] || [ "$${STATUS}" = "404" ]; then
+              echo "Environment '$${env_name}' not found in GitHub (HTTP $${STATUS}) — marking as stale"
+              STALE_ENVS_JSON=$(echo "$${STALE_ENVS_JSON}" | jq --arg env "$${env_name}" '. + [$env]')
             else
-              echo "Environment '${env_name}' exists (HTTP ${STATUS}) — keeping in state"
+              echo "Environment '$${env_name}' exists (HTTP $${STATUS}) — keeping in state"
             fi
-          done <<< "${ENVS}"
+          done <<< "$${ENVS}"
 
-          STALE_COUNT=$(echo "${STALE_ENVS_JSON}" | jq 'length')
-          if [ "${STALE_COUNT}" -eq 0 ]; then
+          STALE_COUNT=$(echo "$${STALE_ENVS_JSON}" | jq 'length')
+          if [ "$${STALE_COUNT}" -eq 0 ]; then
             echo "No stale environments found — state is clean"
             exit 0
           fi
 
-          echo "Removing ${STALE_COUNT} stale github_repository_environment resource(s) from state..."
-          jq --argjson stale "${STALE_ENVS_JSON}" \
+          echo "Removing $${STALE_COUNT} stale github_repository_environment resource(s) from state..."
+          jq --argjson stale "$${STALE_ENVS_JSON}" \
             '.resources |= map(select(
               .type != "github_repository_environment" or
               (.instances[0].attributes.environment as $e | $stale | index($e) == null)
             )) | .serial += 1' \
             /tmp/tf_state.json > /tmp/tf_state_updated.json
 
-          if [ -n "${STATE_KMS_KEY}" ]; then
+          if [ -n "$${STATE_KMS_KEY}" ]; then
             aws s3 cp /tmp/tf_state_updated.json \
-              "s3://${{ secrets.STATE_BUCKET_NAME }}/${STATE_KEY}" \
+              "s3://${{ secrets.STATE_BUCKET_NAME }}/$${STATE_KEY}" \
               --region "${{ env.AWS_REGION }}" \
-              --sse aws:kms --sse-kms-key-id "${STATE_KMS_KEY}"
+              --sse aws:kms --sse-kms-key-id "$${STATE_KMS_KEY}"
           else
             aws s3 cp /tmp/tf_state_updated.json \
-              "s3://${{ secrets.STATE_BUCKET_NAME }}/${STATE_KEY}" \
+              "s3://${{ secrets.STATE_BUCKET_NAME }}/$${STATE_KEY}" \
               --region "${{ env.AWS_REGION }}"
           fi
 
-          echo "State cleaned up — ${STALE_COUNT} environment(s) removed from Terraform tracking"
+          echo "State cleaned up — $${STALE_COUNT} environment(s) removed from Terraform tracking"
 
       - name: Terraform Plan
         id: plan
@@ -207,7 +207,7 @@ jobs:
             echo ""
           } >> "$GITHUB_STEP_SUMMARY"
 
-          if [ -z "${GITHUB_TRIGGERING_ACTOR:-}" ] || [ "$GITHUB_TRIGGERING_ACTOR" = "$GITHUB_ACTOR" ]; then
+          if [ -z "$${GITHUB_TRIGGERING_ACTOR:-}" ] || [ "$GITHUB_TRIGGERING_ACTOR" = "$GITHUB_ACTOR" ]; then
             {
               echo "> **Warning**: Auto-approved - no reviewers configured for \`nexus-deploy\` environment."
               echo ">"
@@ -239,7 +239,7 @@ jobs:
         id: app-token
         uses: actions/create-github-app-token@d72941d797fd3113feb6b93fd0dec494b13a2547 # v1
         with:
-          client-id: ${{ secrets.GNM_APP_ID }}
+          app-id: ${{ secrets.GNM_APP_ID }}
           private-key: ${{ secrets.GNM_APP_PRIVATE_KEY }}
           owner: ${{ github.repository_owner }}
 
