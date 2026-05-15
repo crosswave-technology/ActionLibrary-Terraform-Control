@@ -828,4 +828,4 @@ fi
 
 cat "$summary_file" >> "$GITHUB_STEP_SUMMARY"
 echo "comment_file=$comment_file" >> "$GITHUB_OUTPUT"
-echo "comment_marker=$comment_marker" >> "$GITHUB_OUTPUT"
+echo "comment_marker=$comment_marker" >> "$GITHUB_OUTPUT"
