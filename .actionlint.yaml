@@ -1,0 +1,22 @@
+# .actionlint.yaml
+# Crosswave Technology â€” GitOps platform actionlint configuration.
+#
+# All security-relevant checks remain active. This file suppresses
+# narrow false positives that occur in our standard workflow templates.
+#
+# Suppression rationale:
+#   github.event.pull_request.number   â€” positive integer; no injection risk
+#   github.event.pull_request.base.sha â€” 40-hex commit SHA; no injection risk
+#   github.event.pull_request.head.sha â€” 40-hex commit SHA; no injection risk
+#
+# These fields are used directly in pre-check_actionlint.yml and
+# pre-check_secrets.yml. Moving them to env: vars is a tracked improvement.
+
+self-hosted-runner:
+  # All jobs run on GitHub-hosted ubuntu-latest. No self-hosted runner labels.
+  labels: []
+
+ignore:
+  # PR number and commit SHAs cannot carry shell injection payloads.
+  - '"github\.event\.pull_request\.number" is potentially unsafe'
+  - '"github\.event\.pull_request\.(base|head)\.sha" is potentially unsafe'

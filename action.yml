@@ -1,4 +1,4 @@
-name: Terraform Control
+﻿name: Terraform Control
 description: "Run terraform init/plan/apply/destroy with summarized outputs."
 
 inputs:
@@ -359,7 +359,7 @@ runs:
         echo "plan_log_file=$plan_log_file" >> "$GITHUB_OUTPUT"
         echo "trace_file=$trace_file" >> "$GITHUB_OUTPUT"
 
-        # Extract structured errors from plan log — no expensive TRACE re-run
+        # Extract structured errors from plan log â€” no expensive TRACE re-run
         error_count=0
         error_file="${RUNNER_TEMP:-/tmp}/terraform-plan-errors.txt"
         : > "$error_file"
@@ -884,13 +884,13 @@ runs:
 
           # Status badge
           if [ "$validate_status" = "failed" ]; then
-            plan_status_line="🔴 **Plan** — blocked (validation failed)"
+            plan_status_line="ðŸ”´ **Plan** â€” blocked (validation failed)"
           elif [ "$plan_exit_code" = "1" ]; then
-            plan_status_line="🔴 **Plan** — failed"
+            plan_status_line="ðŸ”´ **Plan** â€” failed"
           elif [ "$plan_has_changes" = "true" ]; then
-            plan_status_line="🟡 **Plan** — changes pending"
+            plan_status_line="ðŸŸ¡ **Plan** â€” changes pending"
           else
-            plan_status_line="🟢 **Plan** — no changes"
+            plan_status_line="ðŸŸ¢ **Plan** â€” no changes"
           fi
 
           {
@@ -899,7 +899,7 @@ runs:
             echo "$plan_status_line &nbsp;|&nbsp; Run: [${GITHUB_RUN_ID}](${run_url})"
             echo ""
             # Resource counts table
-            echo "| 🟢 Add | 🟡 Change | 🔴 Destroy |"
+            echo "| ðŸŸ¢ Add | ðŸŸ¡ Change | ðŸ”´ Destroy |"
             echo "| --- | --- | --- |"
             echo "| ${plan_add} | ${plan_change} | ${plan_destroy} |"
             # Checks table
@@ -912,14 +912,14 @@ runs:
             fi
           } >> "$section_content_file"
 
-          # Error block when plan failed — uses extracted errors file
+          # Error block when plan failed â€” uses extracted errors file
           error_file_path="${{ steps.plan.outputs.plan_error_file }}"
           error_count_val="${{ steps.plan.outputs.plan_error_count }}"
           if [ -n "$error_count_val" ] && [ "$error_count_val" != "0" ] && [ -n "$error_file_path" ] && [ -f "$error_file_path" ] && [ -s "$error_file_path" ]; then
             {
               echo ""
               echo "<details>"
-              echo "<summary>🔴 <strong>Plan errors (${error_count_val})</strong></summary>"
+              echo "<summary>ðŸ”´ <strong>Plan errors (${error_count_val})</strong></summary>"
               echo ""
               echo '```'
               head -c 4000 "$error_file_path"
@@ -930,7 +930,7 @@ runs:
             {
               echo ""
               echo "<details>"
-              echo "<summary>🔴 <strong>Plan error output</strong></summary>"
+              echo "<summary>ðŸ”´ <strong>Plan error output</strong></summary>"
               echo ""
               echo '```'
               head -c 3000 "$plan_log_file"
@@ -954,7 +954,7 @@ runs:
           # Build the full comment_file with consolidated structure
           {
             echo "${consolidated_marker}"
-            echo "## 🔍 Terraform PR Report"
+            echo "## ðŸ” Terraform PR Report"
             echo ""
             echo "_Last updated: $(date -u '+%Y-%m-%dT%H:%M:%SZ') by run [${GITHUB_RUN_ID}](${run_url})_"
             echo ""
@@ -1273,7 +1273,7 @@ runs:
 
     - name: Terraform PR comment
       if: ${{ always() && inputs.command == 'plan' && inputs.comment-on-pr == 'true' }}
-      uses: actions/github-script@v7
+      uses: actions/github-script@f28e40c7f34bde8b3046d885e986cb6290c5673b # v7
       env:
         COMMENT_FILE: ${{ steps.summary.outputs.comment_file }}
         COMMENT_MARKER: ${{ steps.summary.outputs.comment_marker }}
@@ -1363,10 +1363,10 @@ runs:
 
             body = updatedBody;
           } else if (existing) {
-            // No section ID — full replacement of the comment
+            // No section ID â€” full replacement of the comment
             body = newContent;
           } else {
-            // No existing consolidated comment — create new
+            // No existing consolidated comment â€” create new
             body = newContent;
             if (!body.includes(CONSOLIDATED_MARKER)) {
               body = `${CONSOLIDATED_MARKER}\n${body}`;
