@@ -89,6 +89,10 @@ inputs:
     description: "When true, include the raw plan output in the action summary."
     required: false
     default: "true"
+  comment-section-id:
+    description: "Section ID for the consolidated PR comment block (e.g. plan-123456789). When set, posts to a single consolidated comment instead of a standalone comment. Derived from working-directory slug when empty."
+    required: false
+    default: ""
   summary-max-lines:
     description: "Maximum diff lines per resource in the summary."
     required: false
@@ -133,6 +137,12 @@ outputs:
   trace_file:
     description: "Absolute path to the Terraform trace log file (if generated)."
     value: ${{ steps.plan.outputs.trace_file }}
+  plan_error_count:
+    description: "Number of distinct Error: blocks detected in plan output."
+    value: ${{ steps.plan.outputs.plan_error_count }}
+  plan_error_file:
+    description: "Path to file containing extracted plan errors."
+    value: ${{ steps.plan.outputs.plan_error_file }}
   apply_exit_code:
     description: "Exit code from terraform apply."
     value: ${{ steps.apply.outputs.apply_exit_code }}
@@ -349,11 +359,28 @@ runs:
         echo "plan_log_file=$plan_log_file" >> "$GITHUB_OUTPUT"
         echo "trace_file=$trace_file" >> "$GITHUB_OUTPUT"
 
-        if [ "$exit_code" -eq 1 ] && [ -z "${TF_LOG:-}" ]; then
-          set +e
-          TF_LOG=TRACE TF_LOG_PATH="$trace_file" terraform plan -no-color -input=false -detailed-exitcode -out="$plan_file" ${{ inputs.plan-args }}
-          set -e
+        # Extract structured errors from plan log — no expensive TRACE re-run
+        error_count=0
+        error_file="${RUNNER_TEMP:-/tmp}/terraform-plan-errors.txt"
+        : > "$error_file"
+        if [ "$exit_code" -eq 1 ] && [ -n "$plan_log_file" ] && [ -f "$plan_log_file" ]; then
+          awk '
+            BEGIN { in_error=0; block=""; count=0 }
+            /^Error:/ {
+              if (in_error && block != "") { print block; print ""; count++ }
+              in_error=1; block=$0 "\n"; next
+            }
+            in_error && /^$/ { if (block != "") { print block; count++ }; in_error=0; block=""; next }
+            in_error { block=block $0 "\n" }
+            END { if (in_error && block != "") { print block; count++ }; print "##COUNT##" count }
+          ' "$plan_log_file" > "$error_file" 2>/dev/null || true
+          error_count=$(grep -o '##COUNT##[0-9]*' "$error_file" | grep -o '[0-9]*' || echo "0")
+          sed -i '/##COUNT##/d' "$error_file" 2>/dev/null || true
+          error_count="${error_count:-0}"
         fi
+
+        echo "plan_error_count=$error_count" >> "$GITHUB_OUTPUT"
+        echo "plan_error_file=$error_file" >> "$GITHUB_OUTPUT"
 
         exit 0
 
@@ -444,7 +471,15 @@ runs:
           path_label="root"
         fi
         comment_slug="$(printf '%s' "$path_label" | tr '/\\' '-' | tr -c 'A-Za-z0-9._-' '-' | tr -s '-')"
-        comment_marker="<!-- terraform-plan:${comment_slug} -->"
+        # Determine section ID and whether to use consolidated comment
+        comment_section_id="${{ inputs.comment-section-id }}"
+        if [ -z "$comment_section_id" ]; then
+          comment_section_id="plan-${comment_slug}"
+        fi
+        section_open="<!-- section:${comment_section_id} -->"
+        section_close="<!-- /section:${comment_section_id} -->"
+        consolidated_marker="<!-- crosswave-terraform-report -->"
+        comment_marker="${consolidated_marker}"
         run_url="https://github.com/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}"
 
         validate_exit="${VALIDATE_EXIT_CODE:-}"
@@ -843,25 +878,90 @@ runs:
         } >> "$summary_file"
 
         if [ "$command" = "plan" ]; then
+          # Build the section content (not the outer comment structure)
+          section_content_file="${RUNNER_TEMP:-/tmp}/terraform-section.md"
+          : > "$section_content_file"
+
+          # Status badge
+          if [ "$validate_status" = "failed" ]; then
+            plan_status_line="🔴 **Plan** — blocked (validation failed)"
+          elif [ "$plan_exit_code" = "1" ]; then
+            plan_status_line="🔴 **Plan** — failed"
+          elif [ "$plan_has_changes" = "true" ]; then
+            plan_status_line="🟡 **Plan** — changes pending"
+          else
+            plan_status_line="🟢 **Plan** — no changes"
+          fi
+
           {
-            echo "${comment_marker}"
-            echo "### Terraform plan (${path_label})"
+            echo "#### ${path_label}"
             echo ""
-            echo "$status_line"
+            echo "$plan_status_line &nbsp;|&nbsp; Run: [${GITHUB_RUN_ID}](${run_url})"
             echo ""
-            if [ "$show_checks_table" = "true" ]; then
-              echo "| Check | Status | Details |"
-              echo "| --- | --- | --- |"
-              echo "| Terraform validate | ${validate_icon} ${validate_status} | ${validate_detail} |"
-              echo "| Checkov scan | ${checkov_icon} ${checkov_status} | ${checkov_detail} |"
-              echo ""
-            fi
-            echo "| Add | Change | Destroy |"
+            # Resource counts table
+            echo "| 🟢 Add | 🟡 Change | 🔴 Destroy |"
             echo "| --- | --- | --- |"
             echo "| ${plan_add} | ${plan_change} | ${plan_destroy} |"
+            # Checks table
+            if [ "$show_checks_table" = "true" ]; then
+              echo ""
+              echo "| Check | Status |"
+              echo "| --- | --- |"
+              echo "| Validate | ${validate_icon} ${validate_status} |"
+              echo "| Checkov | ${checkov_icon} ${checkov_status} |"
+            fi
+          } >> "$section_content_file"
+
+          # Error block when plan failed — uses extracted errors file
+          error_file_path="${{ steps.plan.outputs.plan_error_file }}"
+          error_count_val="${{ steps.plan.outputs.plan_error_count }}"
+          if [ -n "$error_count_val" ] && [ "$error_count_val" != "0" ] && [ -n "$error_file_path" ] && [ -f "$error_file_path" ] && [ -s "$error_file_path" ]; then
+            {
+              echo ""
+              echo "<details>"
+              echo "<summary>🔴 <strong>Plan errors (${error_count_val})</strong></summary>"
+              echo ""
+              echo '```'
+              head -c 4000 "$error_file_path"
+              echo '```'
+              echo "</details>"
+            } >> "$section_content_file"
+          elif [ -n "$plan_log_file" ] && [ -f "$plan_log_file" ] && [ "${plan_exit_code:-}" = "1" ]; then
+            {
+              echo ""
+              echo "<details>"
+              echo "<summary>🔴 <strong>Plan error output</strong></summary>"
+              echo ""
+              echo '```'
+              head -c 3000 "$plan_log_file"
+              echo '```'
+              echo "</details>"
+            } >> "$section_content_file"
+          fi
+
+          # Checkov findings summary
+          if [ -s "$checkov_summary_file" ]; then
+            {
+              echo ""
+              echo "<details>"
+              echo "<summary>${checkov_icon} <strong>Checkov findings</strong></summary>"
+              echo ""
+              cat "$checkov_summary_file"
+              echo "</details>"
+            } >> "$section_content_file"
+          fi
+
+          # Build the full comment_file with consolidated structure
+          {
+            echo "${consolidated_marker}"
+            echo "## 🔍 Terraform PR Report"
             echo ""
-            echo "Run: [${GITHUB_RUN_ID}](${run_url})"
-          } >> "$comment_file"
+            echo "_Last updated: $(date -u '+%Y-%m-%dT%H:%M:%SZ') by run [${GITHUB_RUN_ID}](${run_url})_"
+            echo ""
+            echo "${section_open}"
+            cat "$section_content_file"
+            echo "${section_close}"
+          } > "$comment_file"
         fi
 
         if [ "$command" = "apply" ]; then
@@ -1198,11 +1298,7 @@ runs:
           }
 
           if (!pr) {
-            const response = await github.rest.pulls.get({
-              owner,
-              repo,
-              pull_number: issue_number,
-            });
+            const response = await github.rest.pulls.get({ owner, repo, pull_number: issue_number });
             pr = response.data;
           }
           const isFork = pr.head.repo.full_name !== `${owner}/${repo}`;
@@ -1217,34 +1313,76 @@ runs:
             return;
           }
 
-          const marker = process.env.COMMENT_MARKER || "<!-- terraform-plan -->";
-          let body = fs.readFileSync(commentFile, "utf8").trim();
-          if (!body.includes(marker)) {
-            body = `${marker}\n${body}`;
-          }
+          const CONSOLIDATED_MARKER = "<!-- crosswave-terraform-report -->";
+          const marker = process.env.COMMENT_MARKER || CONSOLIDATED_MARKER;
+          const newContent = fs.readFileSync(commentFile, "utf8").trim();
+
+          // Extract section from new content (between section tags) for targeted replacement
+          const sectionOpenMatch = newContent.match(/<!-- section:([^>]+) -->/);
+          const sectionId = sectionOpenMatch ? sectionOpenMatch[1] : null;
 
           const comments = await github.paginate(github.rest.issues.listComments, {
-            owner,
-            repo,
-            issue_number,
-            per_page: 100,
+            owner, repo, issue_number, per_page: 100,
           });
-          const existing = comments.find((comment) => (comment.body || "").includes(marker));
+          const existing = comments.find((c) => (c.body || "").includes(CONSOLIDATED_MARKER));
+
+          let body;
+          if (existing && sectionId) {
+            // Section-based replacement: splice just this section into the existing comment
+            const sectionOpen = `<!-- section:${sectionId} -->`;
+            const sectionClose = `<!-- /section:${sectionId} -->`;
+
+            // Extract the section content from the new content file
+            const sectionOpenIdx = newContent.indexOf(sectionOpen);
+            const sectionCloseIdx = newContent.indexOf(sectionClose);
+            let sectionBlock;
+            if (sectionOpenIdx !== -1 && sectionCloseIdx !== -1) {
+              sectionBlock = newContent.slice(sectionOpenIdx, sectionCloseIdx + sectionClose.length);
+            } else {
+              sectionBlock = `${sectionOpen}\n${newContent}\n${sectionClose}`;
+            }
+
+            // Replace section in existing body
+            const existingBody = existing.body || "";
+            const existStartIdx = existingBody.indexOf(sectionOpen);
+            const existEndIdx = existingBody.indexOf(sectionClose);
+
+            let updatedBody;
+            if (existStartIdx !== -1 && existEndIdx !== -1) {
+              updatedBody = existingBody.slice(0, existStartIdx) + sectionBlock + existingBody.slice(existEndIdx + sectionClose.length);
+            } else {
+              // Append new section before any trailing content
+              updatedBody = existingBody.trimEnd() + "\n\n" + sectionBlock;
+            }
+
+            // Update the timestamp line
+            updatedBody = updatedBody.replace(
+              /_Last updated:.*_/,
+              `_Last updated: ${new Date().toUTCString()} by run [${context.runId}](${context.serverUrl}/${owner}/${repo}/actions/runs/${context.runId})_`
+            );
+
+            body = updatedBody;
+          } else if (existing) {
+            // No section ID — full replacement of the comment
+            body = newContent;
+          } else {
+            // No existing consolidated comment — create new
+            body = newContent;
+            if (!body.includes(CONSOLIDATED_MARKER)) {
+              body = `${CONSOLIDATED_MARKER}\n${body}`;
+            }
+          }
+
+          // Enforce GitHub 65536 char limit
+          const MAX_BODY = 65000;
+          if (body.length > MAX_BODY) {
+            body = body.slice(0, MAX_BODY) + "\n\n_...comment truncated. See workflow logs for full output._";
+          }
 
           if (existing) {
-            await github.rest.issues.updateComment({
-              owner,
-              repo,
-              comment_id: existing.id,
-              body,
-            });
+            await github.rest.issues.updateComment({ owner, repo, comment_id: existing.id, body });
           } else {
-            await github.rest.issues.createComment({
-              owner,
-              repo,
-              issue_number,
-              body,
-            });
+            await github.rest.issues.createComment({ owner, repo, issue_number, body });
           }
 
     - name: Fail if prechecks or plan failed
