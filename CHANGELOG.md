@@ -9,6 +9,20 @@
 ---
 
 
+## v1.1.4
+
+**Release:** [v1.1.4](https://github.com/crosswave-technology/ActionLibrary-Terraform-Control/releases/tag/v1.1.4)
+**Labels:** Patch
+
+## Problem
+
+scripts/terraform-summary.sh was committed with CRLF line endings. Bash treats pipefail\r as an invalid option name, causing set -euo pipefail on line 2 to fail with exit code 2 for all enrolled repos.
+
+## Changes
+
+- scripts/terraform-summary.sh: Converted all CRLF line endings to LF.
+
+---
 ## v1.1.3
 
 **Release:** [v1.1.3](https://github.com/crosswave-technology/ActionLibrary-Terraform-Control/releases/tag/v1.1.3)
