@@ -1,16 +1,8 @@
-# Environment and secrets
+# Secrets
 .env
 .env.*
 *.pem
 *.key
 
-# OS
-.DS_Store
-Thumbs.db
-
-# Editor
-*.swp
-*.swo
-
-# AOS-005 P1: runtime-only override directory -- never committed
+# AOS-005 P1: runtime-only override directory — never committed
 _overrides/
