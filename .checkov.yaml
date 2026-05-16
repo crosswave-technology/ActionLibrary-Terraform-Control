@@ -1,5 +1,0 @@
-# Checkov configuration
-# https://www.checkov.io/2.Basics/CLI%20Command%20Reference.html
-
-skip_checks:
-  - CKV_GHA_7  # Action pinning by commit SHA not required — version tags are used instead

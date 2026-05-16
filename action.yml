@@ -225,77 +225,15 @@ runs:
         set -euo pipefail
         terraform validate -no-color ${{ inputs.validate-args }}
 
-    - name: Install Checkov
-      if: ${{ inputs.command == 'plan' && inputs.checkov-enabled == 'true' }}
-      shell: bash
-      run: |
-        set -euo pipefail
-        python -m pip install --upgrade pip
-        python -m pip install checkov
-
     - name: Checkov scan
       if: ${{ inputs.command == 'plan' && inputs.checkov-enabled == 'true' }}
       id: checkov
-      continue-on-error: true
-      shell: bash
-      working-directory: ${{ inputs.working-directory }}
-      run: |
-        set -euo pipefail
-        log_file="${RUNNER_TEMP:-/tmp}/checkov.json"
-        repo_root="$(git rev-parse --show-toplevel 2>/dev/null || pwd)"
-        var_file="${{ inputs.checkov-var-file }}"
-        var_path="${repo_root}/${var_file}"
-        set +e
-        if [ -n "$var_file" ] && [ -f "$var_path" ]; then
-          checkov -d "$(pwd)" --framework "${{ inputs.checkov-framework }}" --output json --var-file "$var_path" > "$log_file"
-        else
-          checkov -d "$(pwd)" --framework "${{ inputs.checkov-framework }}" --output json > "$log_file"
-        fi
-        exit_code=$?
-        set -e
-        echo "exit_code=$exit_code" >> "$GITHUB_OUTPUT"
-        echo "log_file=$log_file" >> "$GITHUB_OUTPUT"
-        exit 0
-
-    - name: Checkov gate
-      if: ${{ inputs.command == 'plan' && inputs.checkov-enabled == 'true' }}
-      id: checkov_gate
-      shell: bash
-      env:
-        CHECKOV_JSON: ${{ steps.checkov.outputs.log_file }}
-        FAIL_SEVERITIES: ${{ inputs.checkov-fail-severities }}
-      run: |
-        set -euo pipefail
-        if [ -z "${CHECKOV_JSON:-}" ] || [ ! -f "$CHECKOV_JSON" ]; then
-          echo "gate_failed=false" >> "$GITHUB_OUTPUT"
-          echo "fail_severities=" >> "$GITHUB_OUTPUT"
-          exit 0
-        fi
-        node <<'NODE' >> "$GITHUB_OUTPUT"
-        const fs = require("fs");
-        const path = process.env.CHECKOV_JSON;
-        const failLevels = (process.env.FAIL_SEVERITIES || "")
-          .split(",")
-          .map((item) => item.trim().toUpperCase())
-          .filter(Boolean);
-        let data;
-        try {
-          data = JSON.parse(fs.readFileSync(path, "utf8"));
-        } catch (error) {
-          console.log("gate_failed=false");
-          console.log("fail_severities=");
-          process.exit(0);
-        }
-        const results = data && data.results ? data.results : data;
-        const failed = Array.isArray(results.failed_checks) ? results.failed_checks : [];
-        const matched = failed.filter((check) => {
-          const raw = (check.severity || check.severity_level || "UNKNOWN");
-          return failLevels.includes(String(raw).toUpperCase());
-        });
-        const gateFailed = matched.length > 0;
-        process.stdout.write(`gate_failed=${gateFailed ? "true" : "false"}\n`);
-        process.stdout.write(`fail_severities=${failLevels.join(",")}\n`);
-        NODE
+      uses: crosswave-technology/ActionLibrary-Checkov-Control@v1
+      with:
+        working-directory: ${{ inputs.working-directory }}
+        framework: ${{ inputs.checkov-framework }}
+        var-file: ${{ inputs.checkov-var-file }}
+        fail-severities: ${{ inputs.checkov-fail-severities }}
 
     - name: Terraform plan
       if: >-
@@ -434,8 +372,8 @@ runs:
         CHECKOV_EXIT_CODE: ${{ steps.checkov.outputs.exit_code }}
         CHECKOV_OUTCOME: ${{ steps.checkov.outcome }}
         CHECKOV_LOG_FILE: ${{ steps.checkov.outputs.log_file }}
-        CHECKOV_GATE_FAILED: ${{ steps.checkov_gate.outputs.gate_failed }}
-        CHECKOV_GATE_SEVERITIES: ${{ steps.checkov_gate.outputs.fail_severities }}
+        CHECKOV_GATE_FAILED: ${{ steps.checkov.outputs.gate_failed }}
+        CHECKOV_GATE_SEVERITIES: ${{ steps.checkov.outputs.gate_severities }}
         EMIT_RAW_PLAN: ${{ inputs.emit-raw-plan }}
         EMIT_FULL_PLAN: ${{ inputs.emit-full-plan }}
         SUMMARY_MAX_LINES: ${{ inputs.summary-max-lines }}
