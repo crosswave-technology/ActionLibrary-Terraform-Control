@@ -8,6 +8,92 @@
 
 ---
 
+## v1.1.5
+
+**Release:** [v1.1.5](https://github.com/crosswave-technology/ActionLibrary-Terraform-Control/releases/tag/v1.1.5)
+**Labels:** Minor
+
+## Changes
+
+- **action.yml** — Checkov step refactored: delegates to `ActionLibrary-Checkov-Control@v1` composite action.
+- **pre-check_overrides.yml** — AOS-005 Overrides Barrier CI gate added.
+- **.checkov.yaml** — Added config skipping CKV_GHA_7 (SHA pinning) check.
+- **.gitignore** — Removed OS/editor noise (global gitignore concern).
+
+---
+
+
+
+## v1.1.4
+
+**Release:** [v1.1.4](https://github.com/crosswave-technology/ActionLibrary-Terraform-Control/releases/tag/v1.1.4)
+**Labels:** Patch
+
+## Problem
+
+scripts/terraform-summary.sh was committed with CRLF line endings. Bash treats pipefail\r as an invalid option name, causing set -euo pipefail on line 2 to fail with exit code 2 for all enrolled repos.
+
+## Changes
+
+- scripts/terraform-summary.sh: Converted all CRLF line endings to LF.
+
+---
+## v1.1.3
+
+**Release:** [v1.1.3](https://github.com/crosswave-technology/ActionLibrary-Terraform-Control/releases/tag/v1.1.3)
+**Labels:** Patch
+
+## Problem
+
+The three env vars added in v1.1.2 (COMMENT_SECTION_ID, PLAN_ERROR_FILE, PLAN_ERROR_COUNT) had 10-space indentation instead of 8-space, causing a YAML parse error that failed the Set up job step in all enrolled repos.
+
+## Changes
+
+- ction.yml: Fixed indentation of COMMENT_SECTION_ID, PLAN_ERROR_FILE, and PLAN_ERROR_COUNT in the Terraform summary step env block.
+
+---
+## v1.1.2
+
+**Release:** [v1.1.2](https://github.com/crosswave-technology/ActionLibrary-Terraform-Control/releases/tag/v1.1.2)
+**Labels:** Patch
+
+## Problem
+
+The extracted scripts/terraform-summary.sh in v1.1.1 contained three raw GitHub Actions expressions (inputs.comment-section-id, steps.plan.outputs.plan_error_file, steps.plan.outputs.plan_error_count) that were evaluated when the script was inline YAML but cause a ad substitution exit code 2 when bash executes them from an external file.
+
+## Changes
+
+- scripts/terraform-summary.sh: Replaced the three GHA expressions with bash env var lookups using ${VAR_NAME:-} pattern.
+- ction.yml: Added COMMENT_SECTION_ID, PLAN_ERROR_FILE, and PLAN_ERROR_COUNT to the summary step env block so the values are passed correctly to the external script.
+
+---
+## v1.1.1
+
+**Release:** [v1.1.1](https://github.com/crosswave-technology/ActionLibrary-Terraform-Control/releases/tag/v1.1.1)
+**Labels:** Patch
+
+## Problem
+
+GitHub Actions enforces a 21,000 character limit on template string values. The Terraform summary step's inline 
+un: script was 34,567 characters, causing all workflows using ActionLibrary-Terraform-Control@v1.1.0 to fail with:
+
+`
+The template is not valid. ... (Line: 442, Col: 12): Exceeded max expression length 21000
+`
+
+## Solution
+
+Extracted the large inline shell script to scripts/terraform-summary.sh. The composite action step now calls it via 
+un: bash "${{ github.action_path }}/scripts/terraform-summary.sh". No functional changes to the script logic.
+
+## Changes
+
+- ction.yml: Replaced 832-line inline 
+un: block with 
+un: bash "${{ github.action_path }}/scripts/terraform-summary.sh".
+- scripts/terraform-summary.sh: New file — extracted summary generation script.
+- VERSION: 1.1.0 → 1.1.1
+- CHANGELOG.md: Added v1.1.1 entry.
 ## v1.1.0
 
 Upgrades the Terraform Control action to commercial-grade PR reporting with a consolidated comment architecture. All plan/pre-check output from a single workflow now lands in one PR comment using named section blocks, eliminating per-action comment clutter.

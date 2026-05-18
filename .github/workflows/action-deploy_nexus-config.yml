@@ -13,6 +13,8 @@
 # ═══════════════════════════════════════════════════════════════════════════════
 
 name: "Nexus: Repository Deploy"
+run-name: >-
+  ${{ (github.event_name == 'push' || (github.event_name == 'workflow_dispatch' && inputs.apply == true)) && 'Apply' || 'Plan' }} Nexus Config: ${{ github.event.repository.name }}
 
 permissions:
   id-token: write
@@ -35,9 +37,249 @@ on:
         type: boolean
         default: false
 
+env:
+  AWS_REGION: ${{ vars.AWS_REGION || 'eu-west-1' }}
+  TERRAFORM_VERSION: ${{ vars.TERRAFORM_VERSION || '1.7.5' }}
+
 jobs:
-  nexus-config:
-    uses: crosswave-technology/GitHub-Nexus-Repository/.github/workflows/reusable-module_apply-repo-config.yml@v1.0.0
-    with:
-      apply: ${{ github.event_name == 'push' || (github.event_name == 'workflow_dispatch' && inputs.apply) }}
-    secrets: inherit
+  # ─────────────────────────────────────────────────────────────────────────────
+  # Plan Changes
+  # ─────────────────────────────────────────────────────────────────────────────
+  plan:
+    name: Plan
+    runs-on: ubuntu-latest
+    outputs:
+      has_changes: ${{ steps.plan.outputs.has_changes }}
+    steps:
+      - name: Generate GitHub App Token
+        id: app-token
+        uses: actions/create-github-app-token@d72941d797fd3113feb6b93fd0dec494b13a2547 # v1
+        with:
+          app-id: ${{ secrets.GNM_APP_ID }}
+          private-key: ${{ secrets.GNM_APP_PRIVATE_KEY }}
+          owner: ${{ github.repository_owner }}
+
+      - name: Checkout Caller Repository
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+        with:
+          repository: ${{ github.repository }}
+          ref: ${{ github.ref }}
+          path: caller
+          token: ${{ steps.app-token.outputs.token }}
+
+      - name: Checkout GitHub-Nexus-Repository
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+        with:
+          repository: crosswave-technology/GitHub-Nexus-Repository
+          path: nexus
+          token: ${{ steps.app-token.outputs.token }}
+
+      - name: Configure AWS Credentials
+        uses: aws-actions/configure-aws-credentials@7474bc4690e29a8392af63c5b98e7449536d5c3a # v4
+        with:
+          role-to-assume: arn:aws:iam::${{ secrets.STATE_BUCKET_ACCOUNT }}:role/Terraform-State-Plan
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: Configure Git for Private Modules
+        run: |
+          git config --global url."https://x-access-token:${{ steps.app-token.outputs.token }}@github.com/".insteadOf "https://github.com/"
+
+      - name: Remove Stale Environment State
+        # TODO: Remove this step once integrations/terraform-provider-github handles
+        # 403 responses from the environments API the same way it handles 404s (i.e.
+        # treats them as "not found" and removes from state automatically during refresh).
+        # Track: https://github.com/integrations/terraform-provider-github/issues/2289
+        env:
+          GH_TOKEN: ${{ steps.app-token.outputs.token }}
+          STATE_KEY: state/repo/${{ github.repository_id }}/terraform.tfstate
+          STATE_KMS_KEY: ${{ secrets.STATE_KMS_KEY }}
+        run: |
+          set -euo pipefail
+
+          if ! aws s3 cp "s3://${{ secrets.STATE_BUCKET_NAME }}/${STATE_KEY}" /tmp/tf_state.json \
+              --region "${{ env.AWS_REGION }}" 2>/dev/null; then
+            echo "No state file found — nothing to clean up"
+            exit 0
+          fi
+
+          ENVS=$(jq -r '[.resources[] | select(.type == "github_repository_environment") |
+            .instances[].attributes.environment] | unique | .[]' /tmp/tf_state.json 2>/dev/null || true)
+          if [ -z "${ENVS}" ]; then
+            echo "No github_repository_environment resources in state — nothing to clean up"
+            exit 0
+          fi
+
+          STALE_ENVS_JSON="[]"
+          while IFS= read -r env_name; do
+            STATUS=$(curl -s -o /dev/null -w "%{http_code}" \
+              -H "Authorization: Bearer ${GH_TOKEN}" \
+              -H "Accept: application/vnd.github+json" \
+              "https://api.github.com/repos/${{ github.repository }}/environments/${env_name}")
+            if [ "${STATUS}" = "403" ] || [ "${STATUS}" = "404" ]; then
+              echo "Environment '${env_name}' not found in GitHub (HTTP ${STATUS}) — marking as stale"
+              STALE_ENVS_JSON=$(echo "${STALE_ENVS_JSON}" | jq --arg env "${env_name}" '. + [$env]')
+            else
+              echo "Environment '${env_name}' exists (HTTP ${STATUS}) — keeping in state"
+            fi
+          done <<< "${ENVS}"
+
+          STALE_COUNT=$(echo "${STALE_ENVS_JSON}" | jq 'length')
+          if [ "${STALE_COUNT}" -eq 0 ]; then
+            echo "No stale environments found — state is clean"
+            exit 0
+          fi
+
+          echo "Removing ${STALE_COUNT} stale github_repository_environment resource(s) from state..."
+          jq --argjson stale "${STALE_ENVS_JSON}" \
+            '.resources |= map(select(
+              .type != "github_repository_environment" or
+              (.instances[0].attributes.environment as $e | $stale | index($e) == null)
+            )) | .serial += 1' \
+            /tmp/tf_state.json > /tmp/tf_state_updated.json
+
+          if [ -n "${STATE_KMS_KEY}" ]; then
+            aws s3 cp /tmp/tf_state_updated.json \
+              "s3://${{ secrets.STATE_BUCKET_NAME }}/${STATE_KEY}" \
+              --region "${{ env.AWS_REGION }}" \
+              --sse aws:kms --sse-kms-key-id "${STATE_KMS_KEY}"
+          else
+            aws s3 cp /tmp/tf_state_updated.json \
+              "s3://${{ secrets.STATE_BUCKET_NAME }}/${STATE_KEY}" \
+              --region "${{ env.AWS_REGION }}"
+          fi
+
+          echo "State cleaned up — ${STALE_COUNT} environment(s) removed from Terraform tracking"
+
+      - name: Terraform Plan
+        id: plan
+        uses: crosswave-technology/ActionLibrary-Terraform-Control@v1.1.4
+        env:
+          GITHUB_TOKEN: ${{ steps.app-token.outputs.token }}
+        with:
+          working-directory: nexus
+          command: plan
+          terraform-version: ${{ env.TERRAFORM_VERSION }}
+          init-args: >-
+            -backend-config="bucket=${{ secrets.STATE_BUCKET_NAME }}"
+            -backend-config="key=state/repo/${{ github.repository_id }}/terraform.tfstate"
+            -backend-config="kms_key_id=${{ secrets.STATE_KMS_KEY }}"
+            -backend-config="region=${{ env.AWS_REGION }}"
+            -backend-config="encrypt=true"
+          plan-args: >-
+            -var-file="../caller/.github/repo_config.tfvars"
+            -var='name=${{ github.event.repository.name }}'
+            -var='organization=${{ github.repository_owner }}'
+            -var='state_bucket_name=${{ secrets.STATE_BUCKET_NAME }}'
+          comment-on-pr: "false"
+          emit-summary: "true"
+          emit-raw-plan: "true"
+
+      - name: Upload Plan Artifact
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: tfplan-${{ github.repository_id }}
+          path: nexus/terraform.plan
+          retention-days: 1
+
+  # ─────────────────────────────────────────────────────────────────────────────
+  # Approval Gate
+  # ─────────────────────────────────────────────────────────────────────────────
+  # Requires manual approval before applying changes.
+  # Configure required reviewers in: Settings → Environments → nexus-deploy
+  # Skipped on pull_request (plan-only validation mode).
+  # ─────────────────────────────────────────────────────────────────────────────
+  approve:
+    name: Approve
+    needs: plan
+    if: ${{ github.event_name == 'push' || (github.event_name == 'workflow_dispatch' && inputs.apply == true) }}
+    runs-on: ubuntu-latest
+    environment:
+      name: nexus-deploy
+      url: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+    steps:
+      - name: Deployment Summary
+        env:
+          REPO_NAME: ${{ github.event.repository.name }}
+          REPO_ID: ${{ github.repository_id }}
+        run: |
+          {
+            echo "## Nexus Configuration Approval"
+            echo ""
+          } >> "$GITHUB_STEP_SUMMARY"
+
+          if [ -z "${GITHUB_TRIGGERING_ACTOR:-}" ] || [ "$GITHUB_TRIGGERING_ACTOR" = "$GITHUB_ACTOR" ]; then
+            {
+              echo "> **Warning**: Auto-approved - no reviewers configured for \`nexus-deploy\` environment."
+              echo ">"
+              echo "> To require manual approval, configure required reviewers in:"
+              echo "> **Settings → Environments → nexus-deploy → Required reviewers**"
+            } >> "$GITHUB_STEP_SUMMARY"
+          else
+            echo "**Approved by:** @$GITHUB_ACTOR" >> "$GITHUB_STEP_SUMMARY"
+          fi
+
+          {
+            echo ""
+            echo "**Repository:** $REPO_NAME"
+            echo "**Repository ID:** $REPO_ID"
+          } >> "$GITHUB_STEP_SUMMARY"
+
+  # ─────────────────────────────────────────────────────────────────────────────
+  # Apply Changes
+  # ─────────────────────────────────────────────────────────────────────────────
+  # Skipped on pull_request (plan-only validation mode).
+  # ─────────────────────────────────────────────────────────────────────────────
+  apply:
+    name: Apply
+    needs: [plan, approve]
+    if: ${{ github.event_name == 'push' || (github.event_name == 'workflow_dispatch' && inputs.apply == true) }}
+    runs-on: ubuntu-latest
+    steps:
+      - name: Generate GitHub App Token
+        id: app-token
+        uses: actions/create-github-app-token@d72941d797fd3113feb6b93fd0dec494b13a2547 # v1
+        with:
+          app-id: ${{ secrets.GNM_APP_ID }}
+          private-key: ${{ secrets.GNM_APP_PRIVATE_KEY }}
+          owner: ${{ github.repository_owner }}
+
+      - name: Checkout GitHub-Nexus-Repository
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+        with:
+          repository: crosswave-technology/GitHub-Nexus-Repository
+          path: nexus
+          token: ${{ steps.app-token.outputs.token }}
+
+      - name: Download Plan Artifact
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          name: tfplan-${{ github.repository_id }}
+          path: nexus
+
+      - name: Configure AWS Credentials
+        uses: aws-actions/configure-aws-credentials@7474bc4690e29a8392af63c5b98e7449536d5c3a # v4
+        with:
+          role-to-assume: arn:aws:iam::${{ secrets.STATE_BUCKET_ACCOUNT }}:role/Terraform-State-Apply
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: Configure Git for Private Modules
+        run: |
+          git config --global url."https://x-access-token:${{ steps.app-token.outputs.token }}@github.com/".insteadOf "https://github.com/"
+
+      - name: Terraform Apply
+        uses: crosswave-technology/ActionLibrary-Terraform-Control@v1.1.4
+        env:
+          GITHUB_TOKEN: ${{ steps.app-token.outputs.token }}
+        with:
+          working-directory: nexus
+          command: apply
+          terraform-version: ${{ env.TERRAFORM_VERSION }}
+          init-args: >-
+            -backend-config="bucket=${{ secrets.STATE_BUCKET_NAME }}"
+            -backend-config="key=state/repo/${{ github.repository_id }}/terraform.tfstate"
+            -backend-config="kms_key_id=${{ secrets.STATE_KMS_KEY }}"
+            -backend-config="region=${{ env.AWS_REGION }}"
+            -backend-config="encrypt=true"
+          apply-args: terraform.plan
+          auto-approve: "true"
+          emit-summary: "true"
