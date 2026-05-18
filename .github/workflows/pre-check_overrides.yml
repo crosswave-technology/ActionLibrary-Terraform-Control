@@ -1,0 +1,129 @@
+name: "Pre-Check: Overrides Barrier"
+
+on:
+  pull_request:
+    types:
+      - opened
+      - synchronize
+      - reopened
+      - ready_for_review
+
+permissions:
+  contents: read
+  pull-requests: write
+
+jobs:
+  overrides-barrier:
+    name: No _overrides/ content in commit (AOS-005 security gate)
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Check for _overrides/ paths
+        id: check
+        shell: bash
+        run: |
+          set -euo pipefail
+          base="${{ github.event.pull_request.base.sha }}"
+          head="${{ github.event.pull_request.head.sha }}"
+
+          # Find any files added/modified under _overrides/ that are not .gitkeep
+          offending=$(git diff --name-only --diff-filter=ACM "${base}...${head}" \
+            | grep -E '^_overrides/' \
+            | grep -v '\.gitkeep$' \
+            || true)
+
+          if [ -n "$offending" ]; then
+            echo "status=fail" >> "$GITHUB_OUTPUT"
+            {
+              echo "offending<<__EOF__"
+              echo "$offending"
+              echo "__EOF__"
+            } >> "$GITHUB_OUTPUT"
+          else
+            echo "status=pass" >> "$GITHUB_OUTPUT"
+            echo "offending=" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Step summary
+        if: always()
+        shell: bash
+        run: |
+          status="${{ steps.check.outputs.status }}"
+          if [ "$status" = "pass" ]; then
+            {
+              echo "### :white_check_mark: Overrides Barrier — passed (required)"
+              echo ""
+              echo "No \`_overrides/\` content detected in this PR."
+            } >> "$GITHUB_STEP_SUMMARY"
+          else
+            {
+              echo "### :x: Overrides Barrier — **FAILED** (required)"
+              echo ""
+              echo "> \`_overrides/\` is a runtime-only directory created by nexus-init."
+              echo "> Files under \`_overrides/\` must **never** be committed to git."
+              echo "> Committing an override bypasses the Locked Core validator (AOS-005 P1)."
+              echo ""
+              echo "**Offending files:**"
+              echo '```'
+              echo "${{ steps.check.outputs.offending }}"
+              echo '```'
+            } >> "$GITHUB_STEP_SUMMARY"
+          fi
+
+      - name: PR comment
+        if: always() && github.event_name == 'pull_request'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          pr_number="${{ github.event.pull_request.number }}"
+          marker="<!-- overrides-barrier-precheck -->"
+          run_url="https://github.com/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}"
+          status="${{ steps.check.outputs.status }}"
+
+          if [ "$status" = "pass" ]; then
+            body="${marker}
+          ### Overrides Barrier (automated)
+          :white_check_mark: No \`_overrides/\` content detected — passed (required)
+
+          Run: [${GITHUB_RUN_ID}](${run_url})"
+          else
+            body="${marker}
+          ### Overrides Barrier (automated)
+          :x: \`_overrides/\` content detected in this PR — **required check failed**
+
+          \`_overrides/\` is a runtime-only directory. Committing files here bypasses the
+          Locked Core validator (AOS-005 P1 security gate).
+
+          **Offending files:**
+          \`\`\`
+          ${{ steps.check.outputs.offending }}
+          \`\`\`
+
+          Remove these files from the branch. If this is a scaffold \`.gitkeep\`, ensure
+          the filename is exactly \`.gitkeep\` with no other content.
+
+          Run: [${GITHUB_RUN_ID}](${run_url})"
+          fi
+
+          payload=$(jq -n --arg body "$body" '{body:$body}')
+          comment_id=$(gh api "repos/${GITHUB_REPOSITORY}/issues/${pr_number}/comments" \
+            --paginate --jq ".[] | select(.body | contains(\"${marker}\")) | .id" | head -n 1)
+
+          if [ -n "$comment_id" ]; then
+            gh api "repos/${GITHUB_REPOSITORY}/issues/comments/${comment_id}" \
+              -X PATCH --input - <<<"$payload" >/dev/null
+          else
+            gh api "repos/${GITHUB_REPOSITORY}/issues/${pr_number}/comments" \
+              -X POST --input - <<<"$payload" >/dev/null
+          fi
+
+          if [ "$status" != "pass" ]; then
+            echo "::error::_overrides/ content detected in PR. Remove these files: ${{ steps.check.outputs.offending }}"
+            exit 1
+          fi

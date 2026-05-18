@@ -8,6 +8,21 @@
 
 ---
 
+## v1.1.5
+
+**Release:** [v1.1.5](https://github.com/crosswave-technology/ActionLibrary-Terraform-Control/releases/tag/v1.1.5)
+**Labels:** Minor
+
+## Changes
+
+- **action.yml** — Checkov step refactored: delegates to `ActionLibrary-Checkov-Control@v1` composite action.
+- **pre-check_overrides.yml** — AOS-005 Overrides Barrier CI gate added.
+- **.checkov.yaml** — Added config skipping CKV_GHA_7 (SHA pinning) check.
+- **.gitignore** — Removed OS/editor noise (global gitignore concern).
+
+---
+
+
 
 ## v1.1.4
 
@@ -59,7 +74,8 @@ The extracted scripts/terraform-summary.sh in v1.1.1 contained three raw GitHub 
 
 ## Problem
 
-GitHub Actions enforces a 21,000 character limit on template string values. The Terraform summary step's inline un: script was 34,567 characters, causing all workflows using ActionLibrary-Terraform-Control@v1.1.0 to fail with:
+GitHub Actions enforces a 21,000 character limit on template string values. The Terraform summary step's inline 
+un: script was 34,567 characters, causing all workflows using ActionLibrary-Terraform-Control@v1.1.0 to fail with:
 
 `
 The template is not valid. ... (Line: 442, Col: 12): Exceeded max expression length 21000
@@ -67,11 +83,14 @@ The template is not valid. ... (Line: 442, Col: 12): Exceeded max expression len
 
 ## Solution
 
-Extracted the large inline shell script to scripts/terraform-summary.sh. The composite action step now calls it via un: bash "${{ github.action_path }}/scripts/terraform-summary.sh". No functional changes to the script logic.
+Extracted the large inline shell script to scripts/terraform-summary.sh. The composite action step now calls it via 
+un: bash "${{ github.action_path }}/scripts/terraform-summary.sh". No functional changes to the script logic.
 
 ## Changes
 
-- ction.yml: Replaced 832-line inline un: block with un: bash "${{ github.action_path }}/scripts/terraform-summary.sh".
+- ction.yml: Replaced 832-line inline 
+un: block with 
+un: bash "${{ github.action_path }}/scripts/terraform-summary.sh".
 - scripts/terraform-summary.sh: New file — extracted summary generation script.
 - VERSION: 1.1.0 → 1.1.1
 - CHANGELOG.md: Added v1.1.1 entry.
