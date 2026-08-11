@@ -1,4 +1,23 @@
 #!/usr/bin/env bash
+# ═══════════════════════════════════════════════════════════════════════════════
+# ActionLibrary: Terraform Control — job summary / PR comment renderer
+# ═══════════════════════════════════════════════════════════════════════════════
+# Invoked by the "Terraform summary" step of action.yml. It lives outside
+# action.yml on purpose: as an inline `run:` block containing ${{ }} expressions
+# it is evaluated as a template string, and GitHub caps those at 21,000
+# characters — the v1.1.0 outage (CHANGELOG "Fixed — summary size"). Everything
+# it needs arrives as environment variables, so the step body stays tiny.
+#
+# Inputs (environment): COMMAND, WORKING_DIRECTORY, PLAN_* , APPLY_*,
+#   VALIDATE_*, CHECKOV_*, EMIT_RAW_PLAN, EMIT_FULL_PLAN, SUMMARY_MAX_LINES,
+#   COMMENT_SECTION_ID, SUMMARY_MAX_BYTES (optional override).
+# Outputs: appends to $GITHUB_STEP_SUMMARY; writes comment_file / comment_marker
+#   to $GITHUB_OUTPUT.
+#
+# Line endings MUST stay LF: a CRLF copy of this file broke every enrolled repo
+# once already (`set -euo pipefail\r`). See .gitattributes.
+# ═══════════════════════════════════════════════════════════════════════════════
+
 set -euo pipefail
 
 command="${COMMAND:-plan}"
@@ -19,6 +38,47 @@ if [ "${EMIT_FULL_PLAN:-false}" = "true" ]; then
 fi
 max_lines_per_resource="${SUMMARY_MAX_LINES:-80}"
 max_log_chars=30000
+
+# GitHub drops a step summary that exceeds 1 MiB, so a pathological plan would
+# silently lose the whole report. Cap what we write and say so in the output.
+summary_max_bytes="${SUMMARY_MAX_BYTES:-900000}"
+summary_guard_reserve=4096
+
+# Truncate $1 in place at the byte budget, closing any HTML/code block the cut
+# left open, and append a note. No-op when the file is within budget.
+truncate_summary_file() {
+  target_file="$1"
+  [ -f "$target_file" ] || return 0
+  file_bytes="$(wc -c < "$target_file")"
+  if [ "$file_bytes" -le "$summary_max_bytes" ]; then
+    return 0
+  fi
+  cut_file="${target_file}.cut"
+  head -c "$summary_max_bytes" "$target_file" > "$cut_file"
+  # drop the (possibly partial) final line
+  sed -i '$d' "$cut_file"
+  fence_count="$(grep -c '^```$' "$cut_file" || true)"
+  if [ $(( fence_count % 2 )) -eq 1 ]; then
+    printf '```\n' >> "$cut_file"
+  fi
+  pre_open="$(grep -c '<pre>' "$cut_file" || true)"
+  pre_close="$(grep -c '</pre>' "$cut_file" || true)"
+  while [ "$pre_open" -gt "$pre_close" ]; do
+    printf '</pre>\n' >> "$cut_file"
+    pre_close=$(( pre_close + 1 ))
+  done
+  det_open="$(grep -c '<details' "$cut_file" || true)"
+  det_close="$(grep -c '</details>' "$cut_file" || true)"
+  while [ "$det_open" -gt "$det_close" ]; do
+    printf '</details>\n' >> "$cut_file"
+    det_close=$(( det_close + 1 ))
+  done
+  {
+    echo ""
+    echo "> :warning: Summary truncated at ${summary_max_bytes} of ${file_bytes} bytes (GitHub step-summary limit). Full output: workflow log and the plan artifact."
+  } >> "$cut_file"
+  mv "$cut_file" "$target_file"
+}
 
 summary_file="${RUNNER_TEMP:-/tmp}/terraform-summary.md"
 comment_file="${RUNNER_TEMP:-/tmp}/terraform-comment.md"
@@ -202,11 +262,11 @@ if [ -z "$plan_text_file" ] || [ ! -f "$plan_text_file" ]; then
 fi
 
 if [ -f "$plan_text_file" ]; then
-  plan_line="$(grep -E 'Plan: [0-9]+ to add, [0-9]+ to change, [0-9]+ to destroy\\.' "$plan_text_file" | tail -n 1 || true)"
+  plan_line="$(grep -E 'Plan: [0-9]+ to add, [0-9]+ to change, [0-9]+ to destroy\.' "$plan_text_file" | tail -n 1 || true)"
   if [ -n "$plan_line" ]; then
-    plan_add="$(printf '%s' "$plan_line" | sed -E 's/.*Plan: ([0-9]+) to add, ([0-9]+) to change, ([0-9]+) to destroy.*/\\1/')"
-    plan_change="$(printf '%s' "$plan_line" | sed -E 's/.*Plan: ([0-9]+) to add, ([0-9]+) to change, ([0-9]+) to destroy.*/\\2/')"
-    plan_destroy="$(printf '%s' "$plan_line" | sed -E 's/.*Plan: ([0-9]+) to add, ([0-9]+) to change, ([0-9]+) to destroy.*/\\3/')"
+    plan_add="$(printf '%s' "$plan_line" | sed -E 's/.*Plan: ([0-9]+) to add, ([0-9]+) to change, ([0-9]+) to destroy.*/\1/')"
+    plan_change="$(printf '%s' "$plan_line" | sed -E 's/.*Plan: ([0-9]+) to add, ([0-9]+) to change, ([0-9]+) to destroy.*/\2/')"
+    plan_destroy="$(printf '%s' "$plan_line" | sed -E 's/.*Plan: ([0-9]+) to add, ([0-9]+) to change, ([0-9]+) to destroy.*/\3/')"
   fi
 fi
 
@@ -227,6 +287,17 @@ if [ "$command" = "plan" ]; then
         has_errors="true"
       fi
     fi
+  fi
+  # Terraform writes plan errors to the plan LOG; $plan_text_file is `terraform
+  # show` output and cannot contain them. Test the log (and the error count the
+  # plan step already extracted) so a failed plan never renders as green.
+  if [ "$has_errors" = "false" ] && [ -n "$plan_log_file" ] && [ -f "$plan_log_file" ]; then
+    if grep -v '^Error: Process completed with exit code' "$plan_log_file" | grep -q '^Error:'; then
+      has_errors="true"
+    fi
+  fi
+  if [ "$has_errors" = "false" ] && [ -n "${PLAN_ERROR_COUNT:-}" ] && [ "${PLAN_ERROR_COUNT:-0}" != "0" ]; then
+    has_errors="true"
   fi
   if [ "$validate_status" = "failed" ]; then
     status_line=":x: Terraform plan - blocked (validation failed)"
@@ -443,13 +514,13 @@ if [ "$command" = "plan" ]; then
 
   # Status badge
   if [ "$validate_status" = "failed" ]; then
-    plan_status_line="ðŸ”´ **Plan** â€” blocked (validation failed)"
+    plan_status_line="🔴 **Plan** — blocked (validation failed)"
   elif [ "$plan_exit_code" = "1" ]; then
-    plan_status_line="ðŸ”´ **Plan** â€” failed"
+    plan_status_line="🔴 **Plan** — failed"
   elif [ "$plan_has_changes" = "true" ]; then
-    plan_status_line="ðŸŸ¡ **Plan** â€” changes pending"
+    plan_status_line="🟡 **Plan** — changes pending"
   else
-    plan_status_line="ðŸŸ¢ **Plan** â€” no changes"
+    plan_status_line="🟢 **Plan** — no changes"
   fi
 
   {
@@ -458,7 +529,7 @@ if [ "$command" = "plan" ]; then
     echo "$plan_status_line &nbsp;|&nbsp; Run: [${GITHUB_RUN_ID}](${run_url})"
     echo ""
     # Resource counts table
-    echo "| ðŸŸ¢ Add | ðŸŸ¡ Change | ðŸ”´ Destroy |"
+    echo "| 🟢 Add | 🟡 Change | 🔴 Destroy |"
     echo "| --- | --- | --- |"
     echo "| ${plan_add} | ${plan_change} | ${plan_destroy} |"
     # Checks table
@@ -471,14 +542,14 @@ if [ "$command" = "plan" ]; then
     fi
   } >> "$section_content_file"
 
-  # Error block when plan failed â€” uses extracted errors file
+  # Error block when plan failed — uses extracted errors file
   error_file_path="${PLAN_ERROR_FILE:-}"
   error_count_val="${PLAN_ERROR_COUNT:-}"
   if [ -n "$error_count_val" ] && [ "$error_count_val" != "0" ] && [ -n "$error_file_path" ] && [ -f "$error_file_path" ] && [ -s "$error_file_path" ]; then
     {
       echo ""
       echo "<details>"
-      echo "<summary>ðŸ”´ <strong>Plan errors (${error_count_val})</strong></summary>"
+      echo "<summary>🔴 <strong>Plan errors (${error_count_val})</strong></summary>"
       echo ""
       echo '```'
       head -c 4000 "$error_file_path"
@@ -489,7 +560,7 @@ if [ "$command" = "plan" ]; then
     {
       echo ""
       echo "<details>"
-      echo "<summary>ðŸ”´ <strong>Plan error output</strong></summary>"
+      echo "<summary>🔴 <strong>Plan error output</strong></summary>"
       echo ""
       echo '```'
       head -c 3000 "$plan_log_file"
@@ -513,7 +584,7 @@ if [ "$command" = "plan" ]; then
   # Build the full comment_file with consolidated structure
   {
     echo "${consolidated_marker}"
-    echo "## ðŸ” Terraform PR Report"
+    echo "## 🔍 Terraform PR Report"
     echo ""
     echo "_Last updated: $(date -u '+%Y-%m-%dT%H:%M:%SZ') by run [${GITHUB_RUN_ID}](${run_url})_"
     echo ""
@@ -636,6 +707,7 @@ if [ ! -f "$plan_text_file" ]; then
     echo ""
     echo "_Plan output not available._"
   } >> "$summary_file"
+  truncate_summary_file "$summary_file"
   cat "$summary_file" >> "$GITHUB_STEP_SUMMARY"
   echo "comment_file=$comment_file" >> "$GITHUB_OUTPUT"
   echo "comment_marker=$comment_marker" >> "$GITHUB_OUTPUT"
@@ -762,7 +834,7 @@ awk -v plan_out="$resource_details" -v drift_out="$drift_details" -v max_lines="
   /^Terraform detected the following changes made outside of Terraform/ { if (mode != "drift") { flush(); mode="drift" } }
   /^Terraform used the selected providers/ { if (mode == "drift") { flush(); mode="" } }
   /^Terraform will perform the following actions:/ { if (mode != "plan") { flush(); mode="plan" } }
-  /^Plan:|^Changes to Outputs:|^No changes\\./ { flush(); exit }
+  /^Plan:|^Changes to Outputs:|^No changes\./ { flush(); exit }
   /^[[:space:]]*# / {
     if (mode == "") { next }
     candidate=$0
@@ -812,6 +884,11 @@ awk -v plan_out="$resource_details" -v drift_out="$drift_details" -v max_lines="
 } >> "$summary_file"
 
 if [ "$emit_raw_plan" = "true" ]; then
+  raw_budget=$(( summary_max_bytes - $(wc -c < "$summary_file") - summary_guard_reserve ))
+  if [ "$raw_budget" -lt 0 ]; then
+    raw_budget=0
+  fi
+  raw_bytes="$(wc -c < "$plan_text_file")"
   {
     echo ""
     echo "---"
@@ -820,11 +897,19 @@ if [ "$emit_raw_plan" = "true" ]; then
     echo "<summary>RAW Plan Output</summary>"
     echo ""
     echo '```'
-    cat "$plan_text_file"
+    if [ "$raw_bytes" -gt "$raw_budget" ]; then
+      head -c "$raw_budget" "$plan_text_file"
+      echo ""
+      echo "... raw plan truncated at ${raw_budget} of ${raw_bytes} bytes (GitHub step-summary limit). Full output: workflow log and the plan artifact."
+    else
+      cat "$plan_text_file"
+    fi
     echo '```'
     echo "</details>"
   } >> "$summary_file"
 fi
+
+truncate_summary_file "$summary_file"
 
 cat "$summary_file" >> "$GITHUB_STEP_SUMMARY"
 echo "comment_file=$comment_file" >> "$GITHUB_OUTPUT"
