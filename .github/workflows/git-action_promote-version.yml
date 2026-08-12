@@ -207,7 +207,7 @@ jobs:
           push_changes: false
 
       - name: Create Logs
-        uses: crosswave-technology/ActionLibrary-Create-Log@v1.1.2
+        uses: crosswave-technology/ActionLibrary-Create-Log@v1.0.0
         if: ${{ needs.discover.outputs.pr_number != '' }}
         with:
           pr_number: ${{ needs.discover.outputs.pr_number }}

@@ -1,0 +1,19 @@
+# ─────────────────────────────────────────────────────────────────────────────
+# Line-ending policy (Nexus estate default)
+#
+# Every text file is stored LF in the index and checked out LF on every
+# platform. Workflow YAML, composite action shell blocks and the scripts they
+# call are executed on Linux runners, where a stray CR is a syntax error rather
+# than a cosmetic difference.
+# ─────────────────────────────────────────────────────────────────────────────
+
+* text=auto eol=lf
+
+# Binary assets: never touched, never diffed as text.
+*.png binary
+*.jpg binary
+*.jpeg binary
+*.gif binary
+*.ico binary
+*.zip binary
+*.gz  binary
