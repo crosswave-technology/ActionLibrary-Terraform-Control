@@ -61,7 +61,7 @@ jobs:
         id: app_token
         uses: actions/create-github-app-token@v1
         with:
-          client-id: ${{ secrets.GNM_APP_ID }}
+          app-id: ${{ secrets.GNM_APP_ID }}
           private-key: ${{ secrets.GNM_APP_PRIVATE_KEY }}
           owner: ${{ github.repository_owner }}
 
@@ -154,7 +154,7 @@ jobs:
         id: app_token
         uses: actions/create-github-app-token@v1
         with:
-          client-id: ${{ secrets.GNM_APP_ID }}
+          app-id: ${{ secrets.GNM_APP_ID }}
           private-key: ${{ secrets.GNM_APP_PRIVATE_KEY }}
           owner: ${{ github.repository_owner }}
 
@@ -254,7 +254,7 @@ jobs:
         id: app_token
         uses: actions/create-github-app-token@v1
         with:
-          client-id: ${{ secrets.GNM_APP_ID }}
+          app-id: ${{ secrets.GNM_APP_ID }}
           private-key: ${{ secrets.GNM_APP_PRIVATE_KEY }}
           owner: ${{ github.repository_owner }}
 
@@ -294,7 +294,7 @@ jobs:
         id: app_token
         uses: actions/create-github-app-token@v1
         with:
-          client-id: ${{ secrets.GNM_APP_ID }}
+          app-id: ${{ secrets.GNM_APP_ID }}
           private-key: ${{ secrets.GNM_APP_PRIVATE_KEY }}
           owner: ${{ github.repository_owner }}
 
