@@ -32,7 +32,7 @@ plan_log_file="${PLAN_LOG_FILE:-}"
 apply_outcome="${APPLY_OUTCOME:-}"
 apply_exit_code="${APPLY_EXIT_CODE:-}"
 apply_log_file="${APPLY_LOG_FILE:-}"
-emit_raw_plan="${EMIT_RAW_PLAN:-true}"
+emit_raw_plan="${EMIT_RAW_PLAN:-false}"
 if [ "${EMIT_FULL_PLAN:-false}" = "true" ]; then
   emit_raw_plan="true"
 fi
@@ -41,7 +41,9 @@ max_log_chars=30000
 
 # GitHub drops a step summary that exceeds 1 MiB, so a pathological plan would
 # silently lose the whole report. Cap what we write and say so in the output.
-summary_max_bytes="${SUMMARY_MAX_BYTES:-900000}"
+# The default matches action.yml's summary-max-bytes: 128 KiB, a readable
+# budget rather than a hair under GitHub's hard limit.
+summary_max_bytes="${SUMMARY_MAX_BYTES:-131072}"
 summary_guard_reserve=4096
 
 # Truncate $1 in place at the byte budget, closing any HTML/code block the cut
@@ -84,6 +86,63 @@ summary_file="${RUNNER_TEMP:-/tmp}/terraform-summary.md"
 comment_file="${RUNNER_TEMP:-/tmp}/terraform-comment.md"
 : > "$summary_file"
 : > "$comment_file"
+
+# ── Renderer failure capture ─────────────────────────────────────────────────
+# This script accumulates the whole report in $summary_file and appends it to
+# $GITHUB_STEP_SUMMARY at the end. Under `set -e` that meant any fault in the
+# renderer - a malformed plan the awk parser choked on, a missing file, a jq
+# error - discarded the entire report: the job failed with an EMPTY summary and
+# the reader had no choice but to open the log. The trap below writes what has
+# been built so far, plus the cause, and only then re-raises the original exit
+# code. Nothing is swallowed; the step still fails.
+summary_written="false"
+renderer_err_line=""
+renderer_err_cmd=""
+
+# shellcheck source=scripts/nexus-summary.sh
+. "$(dirname "$0")/nexus-summary.sh"
+
+flush_summary() {
+  truncate_summary_file "$summary_file"
+  cat "$summary_file" >> "$GITHUB_STEP_SUMMARY"
+  summary_written="true"
+}
+
+renderer_on_exit() {
+  renderer_rc="$1"
+  trap - EXIT ERR
+  set +e
+  if [ "$renderer_rc" -ne 0 ] && [ "$summary_written" != "true" ]; then
+    {
+      echo ""
+      echo "---"
+      echo ""
+      echo "### Terraform ${command} — summary renderer failed"
+      echo ""
+      echo ":x: Terraform ${command} ran, but rendering its summary failed (exit ${renderer_rc}). The partial report is below; the full output is in the run log."
+      echo ""
+      echo "| Field | Value |"
+      echo "| --- | --- |"
+      echo "| Failing line | ${renderer_err_line:-unknown} |"
+      # shellcheck disable=SC2016  # the backticks are markdown, not a subshell
+      printf '| Failing command | `%s` |\n' "$(printf '%s' "${renderer_err_cmd:-unknown}" | cut -c1-160 | nexus_redact)"
+      echo "| Working directory | ${working_dir} |"
+      echo ""
+    } >> "$GITHUB_STEP_SUMMARY"
+    # Deliberately not truncate_summary_file here: the handler must not depend
+    # on anything that could itself be the thing that just failed. A plain
+    # byte-bounded copy is enough, and every step is tolerant of failure.
+    if [ -s "$summary_file" ]; then
+      head -c "${summary_max_bytes:-131072}" "$summary_file" >> "$GITHUB_STEP_SUMMARY" 2>/dev/null || true
+      echo "" >> "$GITHUB_STEP_SUMMARY" 2>/dev/null || true
+    fi
+  fi
+  exit "$renderer_rc"
+}
+
+set -E
+trap 'renderer_err_line="$LINENO"; renderer_err_cmd="$BASH_COMMAND"' ERR
+trap 'renderer_on_exit "$?"' EXIT
 
 path_label="$working_dir"
 if [ -z "$path_label" ] || [ "$path_label" = "." ]; then
@@ -485,6 +544,11 @@ NODE
 fi
 
 {
+  # Leading rule: each action's summary is its own box, so a job that runs
+  # several of them reads as separate blocks rather than one wall of text.
+  echo ""
+  echo "---"
+  echo ""
   echo "$header"
   echo ""
   echo "$status_line"
@@ -638,7 +702,10 @@ if [ "$command" = "apply" ]; then
     echo "</details>"
   } >> "$summary_file"
 
-  cat "$summary_file" >> "$GITHUB_STEP_SUMMARY"
+  # The apply path used to append without the cap, so a large apply log could
+  # push the summary past GitHub's 1 MiB limit and lose the whole report - the
+  # exact failure truncate_summary_file exists to prevent on the plan path.
+  flush_summary
   echo "comment_file=$comment_file" >> "$GITHUB_OUTPUT"
   echo "comment_marker=$comment_marker" >> "$GITHUB_OUTPUT"
   exit 0
@@ -707,8 +774,7 @@ if [ ! -f "$plan_text_file" ]; then
     echo ""
     echo "_Plan output not available._"
   } >> "$summary_file"
-  truncate_summary_file "$summary_file"
-  cat "$summary_file" >> "$GITHUB_STEP_SUMMARY"
+  flush_summary
   echo "comment_file=$comment_file" >> "$GITHUB_OUTPUT"
   echo "comment_marker=$comment_marker" >> "$GITHUB_OUTPUT"
   exit 0
@@ -909,8 +975,6 @@ if [ "$emit_raw_plan" = "true" ]; then
   } >> "$summary_file"
 fi
 
-truncate_summary_file "$summary_file"
-
-cat "$summary_file" >> "$GITHUB_STEP_SUMMARY"
+flush_summary
 echo "comment_file=$comment_file" >> "$GITHUB_OUTPUT"
 echo "comment_marker=$comment_marker" >> "$GITHUB_OUTPUT"

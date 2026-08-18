@@ -122,9 +122,14 @@ inputs:
     required: false
     default: "true"
   emit-raw-plan:
-    description: "When true, include the raw plan output in the action summary."
+    description: >-
+      When true, append the entire `terraform show` plan text to the job summary.
+      Default flipped to "false" in v1.1.0: the structured per-resource blocks
+      above it already carry the change set, and the raw dump is what turned the
+      summary into something to scroll past rather than read. Callers that pass
+      emit-raw-plan explicitly are unaffected; emit-full-plan still forces it on.
     required: false
-    default: "true"
+    default: "false"
   comment-section-id:
     description: "Section ID for the consolidated PR comment block (e.g. plan-123456789). When set, posts to a single consolidated comment instead of a standalone comment. Derived from working-directory slug when empty."
     required: false
@@ -134,9 +139,15 @@ inputs:
     required: false
     default: "80"
   summary-max-bytes:
-    description: "Byte budget for the job summary. GitHub drops a step summary over 1 MiB, so the renderer truncates the raw plan and, if still needed, the whole report, with a note naming both sizes."
+    description: >-
+      Byte budget for the job summary. GitHub drops a step summary over 1 MiB,
+      so the renderer truncates the raw plan and, if still needed, the whole
+      report, with a note naming both sizes. Default lowered to 131072 (128 KiB)
+      in v1.1.0: 900000 was a hair under the hard limit rather than a readable
+      budget, and no caller in the estate sets this input. Raise it per call if
+      a genuinely large report is wanted.
     required: false
-    default: "900000"
+    default: "131072"
   git-modules-token:
     description: "Optional token for cloning private Terraform modules during init. When set, configures git credential helper before terraform init."
     required: false
@@ -217,6 +228,13 @@ runs:
       shell: bash
       run: |
         set -euo pipefail
+        # Failure capture: an install/init/fmt/validate/destroy failure aborted
+        # the action before the Terraform summary step could run, so the caller
+        # got a red X and nothing else. The cause is now recorded and rendered
+        # by the "Engine failure summary" step below.
+        # shellcheck source=scripts/nexus-summary.sh
+        . "$GITHUB_ACTION_PATH/scripts/nexus-summary.sh"
+        nexus_capture "Install Terraform"
         version="${{ inputs.terraform-version }}"
 
         if [ -z "$version" ] && command -v terraform >/dev/null 2>&1; then
@@ -250,6 +268,9 @@ runs:
       working-directory: ${{ steps.acquire.outputs.source_dir || inputs.working-directory }}
       run: |
         set -euo pipefail
+        # shellcheck source=scripts/nexus-summary.sh
+        . "$GITHUB_ACTION_PATH/scripts/nexus-summary.sh"
+        nexus_capture "Terraform Init"
         terraform init -input=false -no-color ${{ inputs.init-args }}
 
     - name: Terraform fmt
@@ -258,6 +279,9 @@ runs:
       working-directory: ${{ steps.acquire.outputs.source_dir || inputs.working-directory }}
       run: |
         set -euo pipefail
+        # shellcheck source=scripts/nexus-summary.sh
+        . "$GITHUB_ACTION_PATH/scripts/nexus-summary.sh"
+        nexus_capture "Terraform fmt"
         terraform fmt -check ${{ inputs.fmt-args }}
 
     - name: Terraform validate (pre-plan)
@@ -283,6 +307,9 @@ runs:
       working-directory: ${{ steps.acquire.outputs.source_dir || inputs.working-directory }}
       run: |
         set -euo pipefail
+        # shellcheck source=scripts/nexus-summary.sh
+        . "$GITHUB_ACTION_PATH/scripts/nexus-summary.sh"
+        nexus_capture "Terraform validate"
         terraform validate -no-color ${{ inputs.validate-args }}
 
     - name: Checkov scan
@@ -473,7 +500,7 @@ runs:
 
     - name: Terraform PR comment
       if: ${{ always() && inputs.command == 'plan' && inputs.comment-on-pr == 'true' }}
-      uses: actions/github-script@f28e40c7f34bde8b3046d885e986cb6290c5673b # v7.1.0
+      uses: actions/github-script@3a2844b7e9c422d3c10d287c895573f7108da1b3 # v9.0.0
       env:
         COMMENT_FILE: ${{ steps.summary.outputs.comment_file }}
         COMMENT_MARKER: ${{ steps.summary.outputs.comment_marker }}
@@ -625,8 +652,25 @@ runs:
       working-directory: ${{ steps.acquire.outputs.source_dir || inputs.working-directory }}
       run: |
         set -euo pipefail
+        # shellcheck source=scripts/nexus-summary.sh
+        . "$GITHUB_ACTION_PATH/scripts/nexus-summary.sh"
+        nexus_capture "Terraform destroy"
         approve_flag=""
         if [ "${{ inputs.auto-approve }}" = "true" ]; then
           approve_flag="-auto-approve"
         fi
         terraform destroy -no-color -input=false $approve_flag ${{ inputs.destroy-args }}
+
+    # Renders only when a step outside the plan/apply path failed - acquisition,
+    # install, init, fmt, validate or destroy. Plan and apply failures are
+    # already reported by the Terraform summary step above, so nothing is
+    # duplicated: this step writes at most one box, and usually none.
+    - name: Engine failure summary
+      if: ${{ always() }}
+      shell: bash
+      env:
+        COMMAND: ${{ inputs.command }}
+        WORKING_DIRECTORY: ${{ inputs.working-directory }}
+        SOURCE_DIR: ${{ steps.acquire.outputs.source_dir }}
+        RELEASE_TAG: ${{ inputs.release-tag }}
+      run: bash "$GITHUB_ACTION_PATH/scripts/summary-engine-failure.sh"
