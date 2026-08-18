@@ -27,6 +27,14 @@
 # ═══════════════════════════════════════════════════════════════════════════════
 set -euo pipefail
 
+# Failure capture: acquisition runs before anything that writes a summary, so a
+# missing release, a 404 asset or a bad token used to end the action with an
+# empty job summary. The cause is recorded here and rendered by the engine's
+# "Engine failure summary" step.
+# shellcheck source=scripts/nexus-summary.sh
+. "$(dirname "$0")/nexus-summary.sh"
+nexus_capture "Acquire deployment source"
+
 release_tag="${RELEASE_TAG:-}"
 working_directory="${WORKING_DIRECTORY:-.}"
 
@@ -36,6 +44,7 @@ emit() {
 
 fail() {
   echo "::error::terraform-control: $*" >&2
+  nexus_note_cause "terraform-control: $*"
   exit 1
 }
 
